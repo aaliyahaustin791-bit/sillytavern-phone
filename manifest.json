@@ -1,0 +1,12 @@
+{
+    "display_name": "Phone Extension for SillyTavern",
+    "version": "0.1.0",
+    "description": "A fully functional smartphone simulation — calls, texts, social media, and web browser.",
+    "js": "phone-extension.js",
+    "css": "phone-extension.css",
+    "sillytavern_min_version": "1.12.0",
+    "authors": [
+        { "name": "You" }
+    ],
+    "loading_order": 1000
+}
