@@ -531,13 +531,42 @@ function injectPhone() {
     },300);
 
     setTimeout(function(){
-        var cont=document.getElementById('chatformbuttonssend')||document.getElementById('formbutton');
-        if(!cont)return;
+        // Try multiple selectors for different ST layouts (desktop/mobile)
+        var cont=document.getElementById('chatformbuttonssend')
+            ||document.getElementById('formbutton')
+            ||document.getElementById('send_form')
+            ||document.querySelector('#send_form .form-buttons')
+            ||document.querySelector('.bottom-bar')
+            ||document.querySelector('#move_send_buttons_div');
         var btn=document.createElement('button');btn.id='phone-toggle-btn';
-        btn.innerHTML='<i class="fa-solid fa-mobile-screen-button"></i> Phone';
-        btn.title='Toggle Phone Extension';
+        btn.innerHTML='<i class="fa-solid fa-mobile-screen-button"></i>';
+        btn.title='Toggle Phone';
         btn.onclick=function(){wrap.classList.toggle('popen');if(wrap.classList.contains('popen'))renderUI();};
-        cont.insertBefore(btn,cont.firstChild);
+        if(cont){
+            cont.insertBefore(btn,cont.firstChild);
+        }else{
+            // Fallback: always create a floating toggle button (works on any layout)
+            if(!document.getElementById('phone-toggle-btn')){
+                btn.style.position='fixed';
+                btn.style.bottom='70px';
+                btn.style.right='12px';
+                btn.style.zIndex='9999';
+                btn.style.width='48px';
+                btn.style.height='48px';
+                btn.style.borderRadius='50%';
+                btn.style.background='rgba(79,195,247,.25)';
+                btn.style.border='1px solid rgba(79,195,247,.3)';
+                btn.style.color='#4fc3f7';
+                btn.style.fontSize='20px';
+                btn.style.cursor='pointer';
+                btn.style.backdropFilter='blur(8px)';
+                btn.style.boxShadow='0 4px 12px rgba(0,0,0,.4)';
+                btn.style.display='flex';
+                btn.style.alignItems='center';
+                btn.style.justifyContent='center';
+                document.body.appendChild(btn);
+            }
+        }
     },500);
 
     setInterval(function(){var e=document.querySelector('.ptime');if(e)e.textContent=new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});},60000);
