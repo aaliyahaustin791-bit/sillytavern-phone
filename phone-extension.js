@@ -524,7 +524,6 @@ function injectPhone() {
     document.body.appendChild(wrap);
 
     setTimeout(function(){
-        wrap.classList.add('popen');
         phoneData=loadPhoneData();
         activeApp=phoneData._activeApp||'phone';
         renderUI();
