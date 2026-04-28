@@ -576,14 +576,24 @@ function injectPhone() {
 // AUTO-START
 // ============================================================
 (function(){
-    var maxWait=3000, elapsed=0;
+    var initialized = false;
     function tryInit(){
-        if(typeof chat_metadata!=='undefined'||typeof toastr!=='undefined'){
+        if(initialized) return;
+        if(typeof toastr !== 'undefined'){
+            initialized = true;
             injectPhone();
-        }else{
-            elapsed+=100;
-            if(elapsed<maxWait)setTimeout(tryInit,100);
+            console.log('[Phone Extension] Initialized successfully');
         }
     }
+    // Try immediately
     tryInit();
+    // Poll for up to 10 seconds
+    if(!initialized){
+        var attempts = 0;
+        var poll = setInterval(function(){
+            attempts++;
+            tryInit();
+            if(attempts >= 100) clearInterval(poll);
+        }, 100);
+    }
 })();
