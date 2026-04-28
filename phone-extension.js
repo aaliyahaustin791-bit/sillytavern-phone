@@ -521,6 +521,14 @@ function injectPhone() {
         '<button class="dock-btn" data-dock="browser"><i class="fa-solid fa-globe"></i></button>' +
         '<button class="dock-btn" data-dock="settings"><i class="fa-solid fa-gear"></i></button>' +
         '</div></div>';
+    // Force explicit positioning to bypass CSS conflicts
+    wrap.style.position='fixed';
+    wrap.style.bottom='0px';
+    wrap.style.right='20px';
+    wrap.style.width='360px';
+    wrap.style.height='680px';
+    wrap.style.zIndex='10000';
+
     document.body.appendChild(wrap);
 
     setTimeout(function(){
