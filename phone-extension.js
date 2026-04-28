@@ -579,13 +579,6 @@ function injectPhone() {
     var maxWait=3000, elapsed=0;
     function tryInit(){
         if(typeof chat_metadata!=='undefined'||typeof toastr!=='undefined'){
-            // Inject CSS
-            if(!document.getElementById('phone-css')){
-                var link=document.createElement('link');
-                link.id='phone-css';link.rel='stylesheet';link.type='text/css';
-                link.href='/scripts/extensions/phone-extension/phone-extension.css';
-                document.head.appendChild(link);
-            }
             injectPhone();
         }else{
             elapsed+=100;
