@@ -549,17 +549,9 @@ function injectPhone() {
         btn.innerHTML='<i class="fa-solid fa-mobile-screen-button"></i>';
         btn.title='Toggle Phone';
         btn.onclick=function(){
-            var wasOpen = wrap.classList.contains('popen');
-            console.log('[Phone] Button clicked! popen before:', wasOpen);
             wrap.classList.toggle('popen');
-            console.log('[Phone] popen after:', wrap.classList.contains('popen'));
             if(wrap.classList.contains('popen')){
                 renderUI();
-                var rect = wrap.getBoundingClientRect();
-                console.log('[Phone] Bounding rect: left='+rect.left+' top='+rect.top+' w='+rect.width+' h='+rect.height);
-                console.log('[Phone] Computed: display='+window.getComputedStyle(wrap).display+' pos='+window.getComputedStyle(wrap).position+' z='+window.getComputedStyle(wrap).zIndex+' opacity='+window.getComputedStyle(wrap).opacity);
-            } else {
-                console.log('[Phone] Closed');
             }
         };
         if(cont){
