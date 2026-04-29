@@ -945,113 +945,98 @@ function updateDock() {
 }
 
 // ============================================================
-// EVENT BINDING
+// EVENT BINDING — Single delegated click handler + keydown
 // ============================================================
-function bindEvents() {
-    // Dock
-    var dockBtns = document.querySelectorAll('.dock-btn');
-    for(var bi=0;bi<dockBtns.length;bi++){
-        (function(b){b.onclick=function(){
-            activeApp=b.dataset.dock;
-            if(activeApp!=='messages')activeContactId=null;
-            if(activeApp!=='social')activeSocialTab='feed';
-            if(activeApp==='settings')stopNpcAutoTextEngine();
+function _phoneClickHandler(e) {
+    var t = e.target.closest('[data-dock],[data-key],[data-backspace],[data-call],[data-clear-calls],[data-call-c],'+
+        '[data-msg-view],[data-open-c],[data-send-c],[data-new-post],[data-st],[data-post-id],[data-new-tab],'+
+        '[data-tid],[data-ctab],[data-gourl],[data-bookmark],[data-nav],[data-urlbar],[data-reset],[data-preset]');
+    if (!t) return;
+    try {
+        // Dock
+        if (t.dataset.dock) {
+            activeApp = t.dataset.dock;
+            if(activeApp!=='messages') activeContactId=null;
+            if(activeApp!=='social') activeSocialTab='feed';
+            if(activeApp==='settings') stopNpcAutoTextEngine();
             if(activeApp==='settings' && phoneData._activeApp !== 'settings') startNpcAutoTextEngine();
-            renderUI();
-        };})(dockBtns[bi]);
-    }
-
-    // Phone
-    var keys = document.querySelectorAll('[data-key]');
-    for(var ki=0;ki<keys.length;ki++){(function(b){b.onclick=function(){PhoneApp.addDigit(b.dataset.key);document.getElementById('pdt').textContent=PhoneApp._dialPad;};})(keys[ki]);}
-    var backBtns = document.querySelectorAll('[data-backspace]');
-    for(var bi2=0;bi2<backBtns.length;bi2++){(function(b){b.onclick=function(){PhoneApp.backspace();document.getElementById('pdt').textContent=PhoneApp._dialPad;};})(backBtns[bi2]);}
-    var callBtns = document.querySelectorAll('[data-call]');
-    for(var ci=0;ci<callBtns.length;ci++){(function(b){b.onclick=function(){PhoneApp.startCall();};})(callBtns[ci]);}
-    var clearBtn = document.querySelector('[data-clear-calls]');
-    if(clearBtn) clearBtn.onclick=function(){PhoneApp.clearCalls();};
-    var callContactBtns = document.querySelectorAll('[data-call-c]');
-    for(var ci2=0;ci2<callContactBtns.length;ci2++){(function(b){b.onclick=function(){PhoneApp.callContact(b.dataset.callC);}})(callContactBtns[ci2]);}
-
-    // Messages
-    var msgViews = document.querySelectorAll('[data-msg-view]');
-    for(var mi=0;mi<msgViews.length;mi++){(function(b){b.onclick=function(){activeContactId=null;renderUI();}})(msgViews[mi]);}
-    var openConvoBtns = document.querySelectorAll('[data-open-c]');
-    for(var oci=0;oci<openConvoBtns.length;oci++){(function(el){el.onclick=function(){activeContactId=el.dataset.openC;renderUI();}})(openConvoBtns[oci]);}
-    var sendBtns = document.querySelectorAll('[data-send-c]');
-    for(var si=0;si<sendBtns.length;si++){(function(b){b.onclick=function(){MessagesApp.sendMsg(b.dataset.sendC);}})(sendBtns[si]);}
-
-    // Social
-    var newPostBtn = document.querySelector('[data-new-post]');
-    if(newPostBtn) newPostBtn.onclick=function(){renderUI();};
-    var socialTabs = document.querySelectorAll('[data-st]');
-    for(var stI=0;stI<socialTabs.length;stI++){(function(b){b.onclick=function(){activeSocialTab=b.dataset.st;renderUI();}})(socialTabs[stI]);}
-    var postActions = document.querySelectorAll('[data-post-id]');
-    for(var paI=0;paI<postActions.length;paI++){(function(b){b.onclick=function(e){e.stopPropagation();var id=b.dataset.postId;
-        if(b.dataset.action==='like')SocialApp.likePost(id);
-        else if(b.dataset.action==='rt')SocialApp.retweetPost(id);
-        else if(b.dataset.action==='save')SocialApp.savePost(id);}})(postActions[paI]);}
-    var csb = document.getElementById('csb');
-    if(csb) csb.onclick=function(){SocialApp.submitPost();};
-    var sci = document.getElementById('sci');
-    if(sci) sci.addEventListener('input',function(){
-        var cc=document.getElementById('cc');if(cc)cc.textContent=sci.value.length+'/500';
-        var sb=document.getElementById('csb');if(sb)sb.disabled=sci.value.length===0;
-    });
-
-    // Browser
-    var newTabBtn = document.querySelector('[data-new-tab]');
-    if(newTabBtn) newTabBtn.onclick=function(){BrowserApp.openNewTab();};
-    var tabBtns = document.querySelectorAll('[data-tid]');
-    for(var tbI=0;tbI<tabBtns.length;tbI++){(function(b){b.onclick=function(){phoneData.browser.activeTabId=b.dataset.tid;savePhoneData();renderUI();}})(tabBtns[tbI]);}
-    var closeBtns = document.querySelectorAll('[data-ctab]');
-    for(var cbI=0;cbI<closeBtns.length;cbI++){(function(b){b.onclick=function(e){e.stopPropagation();var tid=b.dataset.ctab;
-        phoneData.browser.tabs=phoneData.browser.tabs.filter(function(t){return t.id!==tid;});
-        if(phoneData.browser.activeTabId===tid){phoneData.browser.activeTabId=phoneData.browser.tabs.length>0?phoneData.browser.tabs[phoneData.browser.tabs.length-1].id:null;}
-        savePhoneData();renderUI();}})(closeBtns[cbI]);}
-    var goBtn = document.querySelector('[data-gourl]');
-    if(goBtn) goBtn.onclick=function(){var u=document.getElementById('burl');if(u&&phoneData.browser.activeTabId)BrowserApp.navigateTo(phoneData.browser.activeTabId,u.value);};
-    var mkBtn = document.querySelector('[data-bookmark]');
-    if(mkBtn) mkBtn.onclick=function(){BrowserApp.bookmarkUrl();};
-    var navBtns = document.querySelectorAll('[data-nav]');
-    for(var nvI=0;nvI<navBtns.length;nvI++){(function(el){el.onclick=function(){if(phoneData.browser.activeTabId)BrowserApp.navigateTo(phoneData.browser.activeTabId,el.dataset.nav);}})(navBtns[nvI]);}
-    var urlBarBtn = document.querySelector('[data-urlbar]');
-    if(urlBarBtn) urlBarBtn.onclick=function(){var bar=document.getElementById('pbar');
-        if(bar) bar.style.display=bar.style.display==='flex'?'none':'flex';};
-
-    // Settings
-    document.querySelectorAll('[data-set]').forEach(function(el){
-        if(el.type==='checkbox') {
-            el.onchange = function(){
-                phoneData.settings[el.dataset.set] = el.checked;
-                savePhoneData();
-                if(el.dataset.set === 'npcTextFrequency' || el.dataset.set === 'npcAutoTexts') startNpcAutoTextEngine();
-            };
-        } else if (el.tagName === 'SELECT') {
-            el.onchange = function(){
-                phoneData.settings[el.dataset.set] = parseFloat(el.value);
-                savePhoneData();
-                startNpcAutoTextEngine();
-            };
+            renderUI(); return;
         }
-    });
+        // Phone dialer
+        if (t.dataset.key) { PhoneApp.addDigit(t.dataset.key); var dt=document.getElementById('pdt'); if(dt) dt.textContent=PhoneApp._dialPad; return; }
+        if (t.dataset.backspace) { PhoneApp.backspace(); var dt2=document.getElementById('pdt'); if(dt2) dt2.textContent=PhoneApp._dialPad; return; }
+        if (t.dataset.call) { PhoneApp.startCall(); return; }
+        if (t.dataset.clearCalls) { PhoneApp.clearCalls(); renderUI(); return; }
+        if (t.dataset.callC) { PhoneApp.callContact(t.dataset.callC); return; }
+        // Messages
+        if (t.dataset.msgView) { activeContactId=null; renderUI(); return; }
+        if (t.dataset.openC) { activeContactId=t.dataset.openC; renderUI(); return; }
+        if (t.dataset.sendC) { MessagesApp.sendMsg(t.dataset.sendC); return; }
+        // Social
+        if (t.dataset.newPost) { renderUI(); return; }
+        if (t.dataset.st) { activeSocialTab=t.dataset.st; renderUI(); return; }
+        if (t.dataset.postId) {
+            var pid=t.dataset.postId;
+            if(t.dataset.action==='like') SocialApp.likePost(pid);
+            else if(t.dataset.action==='rt') SocialApp.retweetPost(pid);
+            else if(t.dataset.action==='save') SocialApp.savePost(pid);
+            return;
+        }
+        if (t.id==='csb') { SocialApp.submitPost(); return; }
+        // Browser
+        if (t.dataset.newTab) { BrowserApp.openNewTab(); return; }
+        if (t.dataset.tid) { phoneData.browser.activeTabId=t.dataset.tid; savePhoneData(); renderUI(); return; }
+        if (t.dataset.ctab) {
+            e.stopPropagation(); var tid=t.dataset.ctab;
+            phoneData.browser.tabs=phoneData.browser.tabs.filter(function(tk){return tk.id!==tid;});
+            if(phoneData.browser.activeTabId===tid){phoneData.browser.activeTabId=phoneData.browser.tabs.length>0?phoneData.browser.tabs[phoneData.browser.tabs.length-1].id:null;}
+            savePhoneData(); renderUI(); return;
+        }
+        if (t.dataset.gourl) { var u=document.getElementById('burl'); if(u&&phoneData.browser.activeTabId) BrowserApp.navigateTo(phoneData.browser.activeTabId,u.value); return; }
+        if (t.dataset.bookmark) { BrowserApp.bookmarkUrl(); return; }
+        if (t.dataset.nav) { if(phoneData.browser.activeTabId) BrowserApp.navigateTo(phoneData.browser.activeTabId,t.dataset.nav); return; }
+        if (t.dataset.urlbar) { var bar=document.getElementById('pbar'); if(bar) bar.style.display=bar.style.display==='flex'?'none':'flex'; return; }
+        // Settings / presets
+        if (t.dataset.set) { PhoneApp.applyPreset(t.dataset.set); return; }
+        if (t.dataset.reset) { if(confirm('Reset ALL phone data for this chat?')){ phoneData=getEmptyPhoneData(); savePhoneData(); renderUI(); if(typeof toastr!=='undefined') toastr.success('Phone data reset'); } return; }
+    } catch(err) { console.warn('[Phone Extension] Click handler error:', err); }
+}
 
-    var resetBtn = document.querySelector('[data-reset]');
-    if(resetBtn) resetBtn.onclick=function(){if(confirm('Reset ALL phone data for this chat?')){
-        phoneData=getEmptyPhoneData();savePhoneData();renderUI();
-        if(typeof toastr!=='undefined') toastr.success('Phone data reset');}};
+function _phoneKeydownHandler(e) {
+    if(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA') return;
+    var m=document.getElementById('pmi');
+    if(e.key==='Enter'&&m&&!e.shiftKey){e.preventDefault();var sb=document.querySelector('[data-send-c]');if(sb)MessagesApp.sendMsg(sb.dataset.sendC);}
+    var u=document.getElementById('burl');
+    if(e.key==='Enter'&&u&&phoneData.browser.activeTabId){e.preventDefault();BrowserApp.navigateTo(phoneData.browser.activeTabId,u.value);}
+}
 
-    // Enter keys
-    document.addEventListener('keydown',function(e){
-        if(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA') return; // Don't hijack normal inputs
-    }, false);
+function bindEvents() {
+    var body = document.getElementById('phone-body');
+    var pbody = document.querySelector('.pbody');
+    // Remove old listeners if any
+    if(body) { body.removeEventListener('click', _phoneClickHandler); body.addEventListener('click', _phoneClickHandler); }
+    if(pbody) { pbody.removeEventListener('keydown', _phoneKeydownHandler); pbody.addEventListener('keydown', _phoneKeydownHandler); }
 
-    document.querySelector('.pbody').addEventListener('keydown',function(e){
-        var m=document.getElementById('pmi');
-        if(e.key==='Enter'&&m&&!e.shiftKey){e.preventDefault();var sb=document.querySelector('[data-send-c]');if(sb)MessagesApp.sendMsg(sb.dataset.sendC);}
-        var u=document.getElementById('burl');
-        if(e.key==='Enter'&&u&&phoneData.browser.activeTabId){e.preventDefault();BrowserApp.navigateTo(phoneData.browser.activeTabId,u.value);}
-    }, true);
+    // Settings toggles (need change input, not click)
+    var settings = document.querySelectorAll('[data-set].sett-chk');
+    for(var i=0;i<settings.length;i++){(function(el){el.onchange=function(){
+        phoneData.settings[el.dataset.set]=el.checked; savePhoneData();
+        if(el.dataset.set==='npcTextFrequency'||el.dataset.set==='npcAutoTexts') startNpcAutoTextEngine();
+    };})(settings[i]);}
+    var selects = document.querySelectorAll('select.sett-sel');
+    for(var j=0;j<selects.length;j++){(function(el){el.onchange=function(){
+        phoneData.settings[el.dataset.set]=parseFloat(el.value); savePhoneData(); startNpcAutoTextEngine();
+    };})(selects[j]);}
+
+    // Compose area character counter
+    var sci = document.getElementById('sci');
+    if(sci) { sci.removeEventListener('input', _phoneInputHandler); sci.addEventListener('input', _phoneInputHandler); }
+}
+
+function _phoneInputHandler() {
+    var sci=document.getElementById('sci'); var cc=document.getElementById('cc');
+    if(cc && sci) cc.textContent=sci.value.length+'/500';
+    var sb=document.getElementById('csb'); if(sb) sb.disabled=!sci.value.trim();
 }
 
 // ============================================================
