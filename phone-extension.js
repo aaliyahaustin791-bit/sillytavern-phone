@@ -126,33 +126,125 @@ function injectMessageToStory(text, direction, contactName) {
 }
 
 // ============================================================
-// AUTO-CONTACT DETECTION
 // ============================================================
-function autoDetectContact() {
-    var charName = (typeof name2 !== 'undefined') ? name2 : null;
-    if (typeof characters !== 'undefined' && typeof this_chid !== 'undefined' && characters[this_chid]) {
-        charName = characters[this_chid].name || charName;
-    }
-    if (!charName) return;
+// CONTACT SCANNING — scan chat messages for mentioned NPCs
+// ============================================================
 
-    var existing = phoneData.contacts.find(function(c){ return c.isCharacter; });
-    if (existing) {
-        if (existing.name !== charName) {
-            existing.name = charName;
-            activeContactId = existing.id;
-            savePhoneData();
-            renderUI();
+/*
+ * Builds a list of known SillyTavern character names to match against.
+ * Uses `characters` array if available, falls back to `name2`.
+ */
+function getKnownCharacterNames() {
+    var names = new Set();
+    if (typeof characters !== 'undefined' && Array.isArray(characters)) {
+        for (var i = 0; i < characters.length; i++) {
+            if (characters[i] && characters[i].name) {
+                names.add(characters[i].name);
+            }
         }
+    }
+    if (typeof name2 !== 'undefined' && name2) {
+        names.add(name2);
+    }
+    return Array.from(names);
+}
+
+/*
+ * Scans the last N chat messages for character names (both spoken and mentioned).
+ * Adds any new characters found as phone contacts.
+ */
+function scanChatForContacts() {
+    var knownNames = getKnownCharacterNames();
+    if (!knownNames.length) return;
+
+    var chatHist = [];
+    if (typeof chat !== 'undefined' && Array.isArray(chat)) {
+        // Grab the last 50 messages for scanning
+        var start = Math.max(0, chat.length - 50);
+        for (var i = start; i < chat.length; i++) {
+            if (chat[i] && chat[i].mes) {
+                chatHist.push(chat[i].mes);
+            }
+        }
+    }
+    if (!chatHist.length) {
+        // No chat history — just add the main character as a contact
+        addOrUpdateContact(name2, true);
         return;
     }
 
-    var contact = { id: randId(), name: charName, phone: 'N/A', avatar: '', isCharacter: true };
-    phoneData.contacts.push(contact);
-    activeContactId = contact.id;
-    savePhoneData();
-    renderUI();
-    console.log('[Phone Extension] Auto-detected ST character as contact:', charName);
+    var found = new Set();
+    var lowerKnown = {};
+    for (var ki = 0; ki < knownNames.length; ki++) {
+        lowerKnown[knownNames[ki].toLowerCase()] = knownNames[ki];
+    }
+
+    for (var mi = 0; mi < chatHist.length; mi++) {
+        var msg = chatHist[mi].toLowerCase();
+        for (var ki2 = 0; ki2 < knownNames.length; ki2++) {
+            var nm = knownNames[ki2];
+            // Match the character name as a whole word (with word boundaries)
+            var re = new RegExp('\\b' + nm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'i');
+            if (re.test(msg)) {
+                found.add(nm);
+            }
+        }
+        // Also try to extract names from common patterns like "@Name", "Name said", etc.
+        var extractRe = /(?:@|"|\'|\s|^)([A-Z][a-zA-Z\s]{1,20})(?:\b(?:said|replied|texted|walked|looked|asked|smiled|laughed| nodded|whispered|shouted|spoke))?/g;
+        var m;
+        while ((m = extractRe.exec(chatHist[mi])) !== null) {
+            var candidate = m[1].replace(/["'@\s]/g, '').trim();
+            if (lowerKnown[candidate.toLowerCase()]) {
+                found.add(lowerKnown[candidate.toLowerCase()]);
+            }
+        }
+    }
+
+    // Add all found characters as contacts
+    var newContacts = 0;
+    var foundArr = Array.from(found);
+    for (var fi = 0; fi < foundArr.length; fi++) {
+        if (addOrUpdateContact(foundArr[fi], false)) {
+            newContacts++;
+        }
+    }
+
+    if (newContacts > 0) {
+        console.log('[Phone Extension] Scanned chat: found ' + newContacts + ' new contact(s)');
+        savePhoneData();
+        renderUI();
+    }
 }
+
+/*
+ * Adds a character as a phone contact if it doesn't already exist.
+ * Returns true if a new contact was added, false if it already existed.
+ */
+function addOrUpdateContact(charName, isMainCharacter) {
+    if (!charName) return false;
+    var existing = phoneData.contacts.find(function(c) { return c.name === charName; });
+    if (existing) {
+        if (isMainCharacter && !existing.isMainCharacter) {
+            existing.isMainCharacter = true;
+            savePhoneData();
+        }
+        return false;
+    }
+    var contact = {
+        id: randId(),
+        name: charName,
+        phone: 'N/A',
+        avatar: '',
+        isCharacter: true,
+        isMainCharacter: !!isMainCharacter,
+    };
+    phoneData.contacts.push(contact);
+    console.log('[Phone Extension] Added contact:', charName, isMainCharacter ? '(main)' : '(mentioned in chat)');
+    return true;
+}
+
+// Backwards-compatible alias
+var autoDetectContact = scanChatForContacts;
 
 // ============================================================
 // NPC AUTO-TEXT ENGINE
@@ -174,14 +266,42 @@ function stopNpcAutoTextEngine() {
 
 function triggerNpcAutoText() {
     if (!getSettings().npcAutoTexts) return;
-    var contact = phoneData.contacts.find(function(c){ return c.isCharacter; });
-    if (!contact) return;
 
     // Prevent if chatting happened recently (e.g., within 2 mins)
     var lastChat = getLastChatTimestamp();
     if (Date.now() - lastChat < 120000) return;
 
+    // Gather all character contacts
+    var allContacts = phoneData.contacts.filter(function(c){ return c.isCharacter; });
+    if (!allContacts.length) return;
+
+    // Pick randomly among them, but slightly weight toward the main character
+    var mainContacts = allContacts.filter(function(c){ return c.isMainCharacter; });
+    var contact;
+    if (mainContacts.length > 0 && Math.random() < 0.6) {
+        contact = mainContacts[Math.floor(Math.random() * mainContacts.length)];
+    } else {
+        // Pick from ALL contacts, avoiding the one who texted most recently
+        var sorted = allContacts.slice().sort(function(a, b) {
+            var aLast = getLastMessageTimestamp(a.id) || 0;
+            var bLast = getLastMessageTimestamp(b.id) || 0;
+            return aLast - bLast;
+        });
+        contact = sorted[0];
+    }
+
     generateNpcText(contact);
+}
+
+function getLastMessageTimestamp(contactId) {
+    if (!phoneData.messages || !phoneData.messages.length) return 0;
+    var last = 0;
+    for (var i = 0; i < phoneData.messages.length; i++) {
+        if (phoneData.messages[i].contactId === contactId && phoneData.messages[i].timestamp > last) {
+            last = phoneData.messages[i].timestamp;
+        }
+    }
+    return last;
 }
 
 function getLastChatTimestamp() {
@@ -258,6 +378,40 @@ function receiveNpcText(contact, text) {
 }
 
 // ============================================================
+// NPC FOLLOW-UP TEXT — triggered after ST chat messages
+// ============================================================
+function triggerNpcFollowUpText() {
+    if (!getSettings().npcAutoTexts) return;
+    var allContacts = phoneData.contacts.filter(function(c){ return c.isCharacter; });
+    if (!allContacts.length) return;
+
+    // 30% chance to send a follow-up text after a chat message
+    if (Math.random() > 0.3) return;
+
+    // Pick main character first, otherwise random
+    var mains = allContacts.filter(function(c){ return c.isMainCharacter; });
+    var contact = mains.length > 0
+        ? mains[Math.floor(Math.random() * mains.length)]
+        : allContacts[Math.floor(Math.random() * allContacts.length)];
+
+    generateNpcText(contact, true);
+}
+
+function getLastMessageTimestamp(contactId) {
+    if (!phoneData.messages || !phoneData.messages.length) return 0;
+    var last = 0;
+    for (var i = 0; i < phoneData.messages.length; i++) {
+        if (phoneData.messages[i].contactId === contactId && phoneData.messages[i].timestamp > last) {
+            last = phoneData.messages[i].timestamp;
+        }
+    }
+    return last;
+}
+
+// Backwards-compatible alias — in case old code references it
+var autoDetectContact = scanChatForContacts;
+
+// ============================================================
 // EVENT SYNC
 // ============================================================
 if (typeof eventSource !== 'undefined' && typeof event_types !== 'undefined') {
@@ -269,6 +423,7 @@ if (typeof eventSource !== 'undefined' && typeof event_types !== 'undefined') {
         activeSocialTab = 'feed';
         renderUI();
         autoDetectContact();
+        scanChatForContacts();
         startNpcAutoTextEngine();
     });
     eventSource.on(event_types.USER_MESSAGE_RENDERED, onChatActivity);
@@ -277,6 +432,7 @@ if (typeof eventSource !== 'undefined' && typeof event_types !== 'undefined') {
 
 function onChatActivity() {
     autoDetectContact();
+    scanChatForContacts();
     // Cooldown reset: recent chat means less urgent to auto-text
     getSettings().lastAutoText = Date.now();
 }
