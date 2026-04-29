@@ -1018,10 +1018,13 @@ function _phoneKeydownHandler(e) {
 }
 
 function bindEvents() {
+    var shell = document.getElementById('pshell');
     var body = document.getElementById('phone-body');
     var pbody = document.querySelector('.pbody');
     // Remove old listeners if any
-    if(body) { body.removeEventListener('click', _phoneClickHandler); body.addEventListener('click', _phoneClickHandler); }
+    // Bind click to shell (contains body + dock + toolbar) so dock buttons work
+    if(shell) { shell.removeEventListener('click', _phoneClickHandler); shell.addEventListener('click', _phoneClickHandler); }
+    if(body && body !== shell) { body.removeEventListener('click', _phoneClickHandler); body.addEventListener('click', _phoneClickHandler); }
     if(pbody) { pbody.removeEventListener('keydown', _phoneKeydownHandler); pbody.addEventListener('keydown', _phoneKeydownHandler); }
 
     // Settings toggles (need change input, not click)
