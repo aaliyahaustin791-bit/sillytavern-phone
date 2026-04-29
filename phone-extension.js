@@ -1138,7 +1138,8 @@ function injectPhone() {
     var initialized = false;
     function tryInit(){
         if(initialized) return;
-        if(typeof toastr !== 'undefined'){
+        // Wait for ST to load critical globals before injecting
+        if(typeof toastr !== 'undefined' && typeof name2 !== 'undefined' && name2){
             initialized = true;
             injectPhone();
             console.log('[Phone Extension v0.2.0] Initialized');
