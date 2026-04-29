@@ -18,6 +18,7 @@ var phoneData = getEmptyPhoneData();
 var activeApp = 'phone';
 var activeContactId = null;
 var activeSocialTab = 'feed';
+var activePhoneSection = 'dialer';
 
 function getDefaultPhoneSettings() {
     return {
@@ -591,20 +592,23 @@ var PhoneApp = {
                     '<span class="pdet">' + c.phone + '</span></div>' +
                     '<button class="pmbtn" data-call-c="'+c.id+'"><i class="fa-solid fa-phone"></i></button></div>';
             }).join('');
+        var dialerActive = activePhoneSection === 'dialer' ? ' active' : '';
+        var recentActive = activePhoneSection === 'recent' ? ' active' : '';
+        var contactsActive = activePhoneSection === 'contacts' ? ' active' : '';
         return '<div class="pa" data-app="call">' +
             '<div class="pa-header"><span class="pa-title"><i class="fa-solid fa-phone"></i> Phone</span>' +
             '<button class="pa-action" data-clear-calls="true"><i class="fa-solid fa-trash"></i></button></div>' +
             '<div class="pa-tabs">' +
-            '<button class="pt active" data-section="dialer"><i class="fa-solid fa-keypad"></i> Dialer</button>' +
-            '<button class="pt" data-section="recent"><i class="fa-solid fa-clock-rotate-left"></i> Recent</button>' +
-            '<button class="pt" data-section="contacts"><i class="fa-solid fa-address-book"></i> Contacts</button></div>' +
-            '<div class="pss active" data-section="dialer">' +
+            '<button class="pt'+dialerActive+'" data-section="dialer"><i class="fa-solid fa-keypad"></i> Dialer</button>' +
+            '<button class="pt'+recentActive+'" data-section="recent"><i class="fa-solid fa-clock-rotate-left"></i> Recent</button>' +
+            '<button class="pt'+contactsActive+'" data-section="contacts"><i class="fa-solid fa-address-book"></i> Contacts</button></div>' +
+            '<div class="pss'+dialerActive+'" data-section="dialer">' +
                 '<div class="pdisp" id="pd"><span id="pdt"> </span></div>' +
                 '<div class="ppad">'+keypad+'</div>' +
                 '<div class="pcbar"><button class="pccb" data-call="true"><i class="fa-solid fa-phone"></i></button>' +
                 '<button class="pbacks" data-backspace="true"><i class="fa-solid fa-delete-left"></i></button></div></div>' +
-            '<div class="pss" data-section="recent">'+recent+'</div>' +
-            '<div class="pss" data-section="contacts">'+contacts+'</div></div>';
+            '<div class="pss'+recentActive+'" data-section="recent">'+recent+'</div>' +
+            '<div class="pss'+contactsActive+'" data-section="contacts">'+contacts+'</div></div>';
     },
     addDigit: function(k) { if(this._dialPad.length<15){this._dialPad+=k;var e=document.getElementById('pdt');if(e)e.textContent+=k;} },
     backspace: function() { this._dialPad=this._dialPad.slice(0,-1); var e=document.getElementById('pdt'); if(e)e.textContent=this._dialPad||' '; },
@@ -720,16 +724,19 @@ var MessagesApp = {
 // ============================================================
 var SocialApp = {
     render: function() {
+        var feedActive = activeSocialTab === 'feed' ? ' active' : '';
+        var savedActive = activeSocialTab === 'saved' ? ' active' : '';
+        var composeActive = activeSocialTab === 'compose' ? ' active' : '';
         return '<div class="pa" data-app="social">' +
             '<div class="pa-header"><span class="pa-title"><i class="fa-solid fa-hashtag"></i> Social</span>' +
             '<button class="pa-action" data-new-post="true"><i class="fa-solid fa-plus"></i></button></div>' +
             '<div class="pa-tabs">' +
-            '<button class="pt active" data-st="feed">Feed</button>' +
-            '<button class="pt" data-st="saved">Saved ('+phoneData.social.savedPosts.length+')</button>' +
-            '<button class="pt" data-st="compose">New Post</button></div>' +
-            '<div class="pss active" data-section="feed">'+this._renderFeed()+'</div>' +
-            '<div class="pss" data-section="saved">'+this._renderSaved()+'</div>' +
-            '<div class="pss" data-section="compose">'+this._renderCompose()+'</div></div>';
+            '<button class="pt'+feedActive+'" data-st="feed">Feed</button>' +
+            '<button class="pt'+savedActive+'" data-st="saved">Saved ('+phoneData.social.savedPosts.length+')</button>' +
+            '<button class="pt'+composeActive+'" data-st="compose">New Post</button></div>' +
+            '<div class="pss'+feedActive+'" data-section="feed">'+this._renderFeed()+'</div>' +
+            '<div class="pss'+savedActive+'" data-section="saved">'+this._renderSaved()+'</div>' +
+            '<div class="pss'+composeActive+'" data-section="compose">'+this._renderCompose()+'</div></div>';
     },
     _renderFeed: function() {
         if(!phoneData.social.feed.length) return '<div class="pempty">Nothing here yet<br><small>Compose a post!</small></div>';
@@ -766,7 +773,7 @@ var SocialApp = {
         return '<div class="cform">' +
             '<textarea class="ctxt" id="sci" placeholder="What is happening?" maxlength="500"></textarea>' +
             '<div class="cact"><span class="ccount" id="cc">0/500</span>' +
-            '<button class="cbtn" id="csb" disabled>Post</button></div></div>';
+            '<button class="cbtn" id="csb" data-submit-post="true" disabled>Post</button></div></div>';
     },
     submitPost: function() {
         var inp=document.getElementById('sci');
@@ -950,7 +957,7 @@ function updateDock() {
 function _phoneClickHandler(e) {
     var t = e.target.closest('[data-dock],[data-key],[data-backspace],[data-call],[data-clear-calls],[data-call-c],'+
         '[data-msg-view],[data-open-c],[data-send-c],[data-new-post],[data-st],[data-post-id],[data-new-tab],'+
-        '[data-tid],[data-ctab],[data-gourl],[data-bookmark],[data-nav],[data-urlbar],[data-reset],[data-preset]');
+        '[data-tid],[data-ctab],[data-gourl],[data-bookmark],[data-nav],[data-urlbar],[data-reset],[data-section],[data-submit-post]');
     if (!t) return;
     try {
         // Dock
@@ -973,8 +980,9 @@ function _phoneClickHandler(e) {
         if (t.dataset.openC) { activeContactId=t.dataset.openC; renderUI(); return; }
         if (t.dataset.sendC) { MessagesApp.sendMsg(t.dataset.sendC); return; }
         // Social
-        if (t.dataset.newPost) { renderUI(); return; }
+        if (t.dataset.newPost) { activeSocialTab='compose'; renderUI(); return; }
         if (t.dataset.st) { activeSocialTab=t.dataset.st; renderUI(); return; }
+        if (t.dataset.section) { activePhoneSection=t.dataset.section; renderUI(); return; }
         if (t.dataset.postId) {
             var pid=t.dataset.postId;
             if(t.dataset.action==='like') SocialApp.likePost(pid);
@@ -982,7 +990,7 @@ function _phoneClickHandler(e) {
             else if(t.dataset.action==='save') SocialApp.savePost(pid);
             return;
         }
-        if (t.id==='csb') { SocialApp.submitPost(); return; }
+        if (t.dataset.submitPost) { SocialApp.submitPost(); return; }
         // Browser
         if (t.dataset.newTab) { BrowserApp.openNewTab(); return; }
         if (t.dataset.tid) { phoneData.browser.activeTabId=t.dataset.tid; savePhoneData(); renderUI(); return; }
@@ -996,8 +1004,7 @@ function _phoneClickHandler(e) {
         if (t.dataset.bookmark) { BrowserApp.bookmarkUrl(); return; }
         if (t.dataset.nav) { if(phoneData.browser.activeTabId) BrowserApp.navigateTo(phoneData.browser.activeTabId,t.dataset.nav); return; }
         if (t.dataset.urlbar) { var bar=document.getElementById('pbar'); if(bar) bar.style.display=bar.style.display==='flex'?'none':'flex'; return; }
-        // Settings / presets
-        if (t.dataset.set) { PhoneApp.applyPreset(t.dataset.set); return; }
+        // Settings (data-set is handled via onchange in bindEvents, not here)
         if (t.dataset.reset) { if(confirm('Reset ALL phone data for this chat?')){ phoneData=getEmptyPhoneData(); savePhoneData(); renderUI(); if(typeof toastr!=='undefined') toastr.success('Phone data reset'); } return; }
     } catch(err) { console.warn('[Phone Extension] Click handler error:', err); }
 }
