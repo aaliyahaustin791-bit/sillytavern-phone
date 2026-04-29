@@ -397,17 +397,6 @@ function triggerNpcFollowUpText() {
     generateNpcText(contact, true);
 }
 
-function getLastMessageTimestamp(contactId) {
-    if (!phoneData.messages || !phoneData.messages.length) return 0;
-    var last = 0;
-    for (var i = 0; i < phoneData.messages.length; i++) {
-        if (phoneData.messages[i].contactId === contactId && phoneData.messages[i].timestamp > last) {
-            last = phoneData.messages[i].timestamp;
-        }
-    }
-    return last;
-}
-
 // Backwards-compatible alias — in case old code references it
 var autoDetectContact = scanChatForContacts;
 
