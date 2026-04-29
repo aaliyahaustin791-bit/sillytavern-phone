@@ -900,6 +900,7 @@ var SettingsApp = {
                 {v:2,l:'Every 2 min'}, {v:5,l:'Every 5 min'}, {v:10,l:'Every 10 min'}, {v:20,l:'Every 20 min'}
             ], s.npcTextFrequency) +
             this._toggle('notifications', 'Notifications', 'Show toast alerts for new texts.') +
+            '<button class="sbtn sbtn-scan" data-scan="true"><i class="fa-solid fa-address-book"></i> Scan for Contacts</button>' +
             '<button class="sbtn" data-reset="true"><i class="fa-solid fa-trash-can"></i> Reset Phone Data</button>' +
             '</div></div>';
     },
@@ -959,7 +960,7 @@ function updateDock() {
 function _phoneClickHandler(e) {
     var t = e.target.closest('[data-dock],[data-key],[data-backspace],[data-call],[data-clear-calls],[data-call-c],'+
         '[data-msg-view],[data-open-c],[data-send-c],[data-new-post],[data-st],[data-post-id],[data-new-tab],'+
-        '[data-tid],[data-ctab],[data-gourl],[data-bookmark],[data-nav],[data-urlbar],[data-reset],[data-section],[data-submit-post]');
+        '[data-tid],[data-ctab],[data-gourl],[data-bookmark],[data-nav],[data-urlbar],[data-reset],[data-scan],[data-section],[data-submit-post]');
     if (!t) return;
     try {
         // Dock
@@ -1007,6 +1008,7 @@ function _phoneClickHandler(e) {
         if (t.dataset.nav) { if(phoneData.browser.activeTabId) BrowserApp.navigateTo(phoneData.browser.activeTabId,t.dataset.nav); return; }
         if (t.dataset.urlbar) { var bar=document.getElementById('pbar'); if(bar) bar.style.display=bar.style.display==='flex'?'none':'flex'; return; }
         // Settings (data-set is handled via onchange in bindEvents, not here)
+        if (t.dataset.scan) { scanChatForContacts(); if(typeof toastr!=='undefined') toastr.success('Scan complete — check console'); return; }
         if (t.dataset.reset) { if(confirm('Reset ALL phone data for this chat?')){ phoneData=getEmptyPhoneData(); savePhoneData(); renderUI(); if(typeof toastr!=='undefined') toastr.success('Phone data reset'); } return; }
     } catch(err) { console.warn('[Phone Extension] Click handler error:', err); }
 }
@@ -1064,6 +1066,14 @@ function _phoneInputHandler() {
 // ============================================================
 function injectPhone() {
     if(document.getElementById('phone-wrap'))return;
+
+    // Diagnostic: check ST globals
+    console.log('[Phone Extension] event_types:', typeof event_types, event_types);
+    console.log('[Phone Extension] eventSource:', typeof eventSource, eventSource);
+    console.log('[Phone Extension] name2:', typeof name2, name2);
+    console.log('[Phone Extension] chat length:', typeof chat, Array.isArray(chat) ? chat.length : 'n/a');
+    console.log('[Phone Extension] characters:', typeof characters, Array.isArray(characters) ? characters.map(function(c){return c.name;}).join(', ') : 'n/a');
+
     var wrap=document.createElement('div');wrap.id='phone-wrap';
     wrap.innerHTML =
         '<div class="pshell" id="pshell">' +
