@@ -1067,12 +1067,18 @@ function _phoneInputHandler() {
 function injectPhone() {
     if(document.getElementById('phone-wrap'))return;
 
-    // Diagnostic: check ST globals
-    console.log('[Phone Extension] event_types:', typeof event_types, event_types);
-    console.log('[Phone Extension] eventSource:', typeof eventSource, eventSource);
-    console.log('[Phone Extension] name2:', typeof name2, name2);
-    console.log('[Phone Extension] chat length:', typeof chat, Array.isArray(chat) ? chat.length : 'n/a');
-    console.log('[Phone Extension] characters:', typeof characters, Array.isArray(characters) ? characters.map(function(c){return c.name;}).join(', ') : 'n/a');
+    // Diagnostic: check ST globals (safe — no direct references to potentially undefined vars)
+    function safeVal(name, get) {
+        try { var v = get(); return name + ': ' + (typeof v === 'object' ? JSON.stringify(v) : v); }
+        catch(e) { return name + ': undefined'; }
+    }
+    console.log('[Phone Extension] Diagnostics — ' + [
+        safeVal('event_types', function(){ return typeof event_types; }),
+        safeVal('eventSource', function(){ return typeof eventSource; }),
+        safeVal('name2', function(){ return name2; }),
+        safeVal('chatLen', function(){ return Array.isArray(chat) ? chat.length : 'n/a'; }),
+        safeVal('charNames', function(){ return Array.isArray(characters) ? characters.map(function(c){return c.name;}).join(', ') : 'n/a'; }),
+    ].join(' | '));
 
     var wrap=document.createElement('div');wrap.id='phone-wrap';
     wrap.innerHTML =
