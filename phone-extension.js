@@ -422,19 +422,147 @@ if (typeof eventSource !== 'undefined' && typeof event_types !== 'undefined') {
         activeContactId = null;
         activeSocialTab = 'feed';
         renderUI();
-        autoDetectContact();
         scanChatForContacts();
         startNpcAutoTextEngine();
     });
-    eventSource.on(event_types.USER_MESSAGE_RENDERED, onChatActivity);
-    eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, onChatActivity);
+    eventSource.on(event_types.USER_MESSAGE_RENDERED, onUserMessage);
+    eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, onCharacterMessage);
 }
 
-function onChatActivity() {
-    autoDetectContact();
+function onUserMessage() {
     scanChatForContacts();
-    // Cooldown reset: recent chat means less urgent to auto-text
     getSettings().lastAutoText = Date.now();
+
+    // Analyze the latest user message for NPC mentions that should react
+    if (typeof chat === 'undefined' || !chat.length) return;
+    var lastMsg = chat[chat.length - 1];
+    if (!lastMsg || lastMsg.is_user !== true) return;
+    var text = lastMsg.mes || '';
+    var lowerText = text.toLowerCase();
+    var contacts = phoneData.contacts.filter(function(c) { return c.isCharacter; });
+
+    // Check if user mentioned other characters by name
+    for (var i = 0; i < contacts.length; i++) {
+        var c = contacts[i];
+        var re = new RegExp('\\b' + c.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'i');
+        if (re.test(text) && !c.isMainCharacter) {
+            // Check cooldown — don't spam reactions for the same contact
+            var lastMsgTime = getLastMessageTimestamp(c.id);
+            if (Date.now() - lastMsgTime < 300000) continue; // 5 min cooldown
+            triggerContextualReaction(c, text, 'mentioned');
+            break; // only one reaction per user message
+        }
+    }
+}
+
+function onCharacterMessage() {
+    scanChatForContacts();
+    getSettings().lastAutoText = Date.now();
+
+    if (typeof chat === 'undefined' || !chat.length) return;
+    var lastMsg = chat[chat.length - 1];
+    if (!lastMsg || lastMsg.is_user === true) return;
+    var text = lastMsg.mes || '';
+    var lowerText = text.toLowerCase();
+    var charName = (typeof name2 !== 'undefined') ? name2 : null;
+    if (typeof characters !== 'undefined' && typeof this_chid !== 'undefined' && characters[this_chid]) {
+        charName = characters[this_chid].name || charName;
+    }
+    var contacts = phoneData.contacts.filter(function(c) { return c.isCharacter; });
+
+    // Check if the speaking character mentioned other characters
+    for (var i = 0; i < contacts.length; i++) {
+        var c = contacts[i];
+        if (c.name === charName) continue;
+        var re = new RegExp('\\b' + c.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'i');
+        if (re.test(text)) {
+            var lastMsgTime = getLastMessageTimestamp(c.id);
+            if (Date.now() - lastMsgTime < 300000) continue;
+            triggerContextualReaction(c, text, 'mentioned_by_' + (charName || 'character'));
+            break;
+        }
+    }
+
+    // Check if the speaking character seems to be reacting to something dramatic
+    var dramatic = /(?:goodbye|bye|leave|going|die|death|kill|hurt|cry|angry|upset|scared|love|kiss|hit|fight|run|hide)/i;
+    if (dramatic.test(text) && charName) {
+        var mainContact = contacts.find(function(c) { return c.isMainCharacter; });
+        if (mainContact) {
+            var lastTime = getLastMessageTimestamp(mainContact.id);
+            if (Date.now() - lastTime > 180000) { // 3 min since last text
+                triggerContextualReaction(mainContact, text, 'dramatic_event');
+            }
+        }
+    }
+}
+
+/*
+ * Triggers an LLM-generated text from a character contact based on a chat event.
+ * eventType: 'mentioned' | 'mentioned_by_X' | 'dramatic_event' | 'follow_up'
+ */
+function triggerContextualReaction(contact, chatText, eventType) {
+    if (!getSettings().npcAutoTexts) return;
+    var user = (typeof name1 !== 'undefined') ? name1 : 'You';
+    var charName = contact.name;
+
+    var systemPrompt = `You are ${charName}. You are texting the user on a phone. Keep the message short, casual, and in character. Max 20 words.`;
+    var context = '';
+    switch (eventType) {
+        case 'mentioned':
+            context = `The user (${user}) just mentioned your name in a conversation. React naturally — you could be curious, amused, annoyed, or want to join in. Here's what they said: "${chatText.substring(0, 200)}". Text them about it.`;
+            break;
+        case 'mentioned_by_character':
+        default:
+            if (eventType.indexOf('mentioned_by_') === 0) {
+                var speaker = eventType.replace('mentioned_by_', '');
+                context = `${speaker} just talked about you in a conversation with ${user}. React as if you heard about it through a friend or somehow sensed it. Here's what was said: "${chatText.substring(0, 200)}". Text ${user} about it.`;
+            } else if (eventType === 'dramatic_event') {
+                context = `Something dramatic just happened in ${user}'s conversation. Here's what was said: "${chatText.substring(0, 200)}". Send a concerned, curious, or reactive text to ${user}.`;
+            } else if (eventType === 'follow_up') {
+                context = `You just finished chatting with ${user} in person. Send them a follow-up text — something casual, like a thought you had after, a joke, or a question. Keep it natural.`;
+            }
+            break;
+    }
+
+    // Add delay to feel realistic (2-8 seconds)
+    var delay = 2000 + Math.floor(Math.random() * 6000);
+    setTimeout(function() {
+        generateNpcTextWithContext(contact, systemPrompt, context);
+    }, delay);
+}
+
+async function generateNpcTextWithContext(contact, systemPrompt, context) {
+    try {
+        var res = await fetch('/api/chat/completions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer no-key-needed-for-localhost' },
+            body: JSON.stringify({
+                messages: [
+                    { role: 'system', content: systemPrompt },
+                    { role: 'user', content: context }
+                ],
+                max_tokens: 50,
+                temperature: 1.0
+            })
+        });
+        var data = await res.json();
+        if (data && data.choices && data.choices[0] && data.choices[0].message) {
+            var text = data.choices[0].message.content.replace(/^["']|["']$/g, '').substring(0, 140);
+            receiveNpcText(contact, text);
+            return;
+        }
+    } catch (e) {
+        console.warn('[Phone Extension] Contextual LLM text failed:', e.message);
+    }
+    // Fallback with contextual flavor
+    var fallbacks = [
+        "Hey, I heard something wild happened... what's going on?",
+        "Did I just hear my name? 👀",
+        "Saw the drama unfolding, you okay?",
+        "Just checking in — everything good?",
+        "That conversation looked intense lol"
+    ];
+    receiveNpcText(contact, fallbacks[Math.floor(Math.random() * fallbacks.length)]);
 }
 
 // ============================================================
