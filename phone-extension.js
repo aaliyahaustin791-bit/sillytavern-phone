@@ -1,30 +1,70 @@
 /**
- * Phone Extension for SillyTavern
+ * Phone Extension for SillyTavern v0.2.0
  * A fully functional smartphone simulation — calls, texts, social media, and web browser.
  * All data is scoped per-chat and never bleeds between conversations.
+ *
+ * NEW in v0.2.0:
+ * - NPCs can text you on their own via ST's LLM
+ * - Toggle: Add phone messages to main chat story
+ * - Auto-contact creation for active ST character
+ * - Toast notifications for incoming texts
  */
 
 // ============================================================
-// STATE & DATA LAYER — per-chat isolation via ST's chat_metadata
+// STATE & SETTINGS
 // ============================================================
 var STORAGE_KEY = 'phone_extension';
 var phoneData = getEmptyPhoneData();
-var activeApp = 'phone'; // phone, messages, social, browser, settings
+var activeApp = 'phone';
 var activeContactId = null;
 var activeSocialTab = 'feed';
 
+function getDefaultPhoneSettings() {
+    return {
+        addToStory: true,          // Inject text messages into ST chat history
+        npcAutoTexts: true,        // Allow NPCs to initiate texts
+        npcTextFrequency: 5,       // Minutes between auto-texts
+        lastAutoText: 0,           // Timestamp of last auto-text
+        notifications: true,       // Show toast on new texts
+    };
+}
+
+function getSettings() {
+    if (!phoneData.settings) phoneData.settings = getDefaultPhoneSettings();
+    // Backwards compat
+    if (!phoneData.settings.hasOwnProperty('addToStory')) phoneData.settings.addToStory = true;
+    return phoneData.settings;
+}
+
+function getEmptyPhoneData() {
+    return {
+        contacts: [],
+        messages: [],
+        phoneCalls: [],
+        social: { feed: [], savedPosts: [] },
+        browser: { tabs: [], activeTabId: null, bookmarks: [], history: [] },
+        settings: getDefaultPhoneSettings(),
+        _activeApp: 'phone',
+        _nextMsgId: 1,
+        _nextSeq: 1
+    };
+}
+
+// ============================================================
+// PERSISTENCE
+// ============================================================
 function loadPhoneData() {
     var m = typeof chat_metadata !== 'undefined' ? chat_metadata : (typeof window !== 'undefined' ? window.chat_metadata : null);
     if (!m || !m[STORAGE_KEY]) return getEmptyPhoneData();
     var e = getEmptyPhoneData();
     var k;
     for (k in e) { if (m[STORAGE_KEY][k] === undefined) m[STORAGE_KEY][k] = e[k]; }
+    if (!m[STORAGE_KEY].settings) m[STORAGE_KEY].settings = getDefaultPhoneSettings();
     return m[STORAGE_KEY];
 }
 
 function savePhoneData(shouldSave) {
     if (shouldSave === undefined) shouldSave = true;
-    phoneData._activeApp = activeApp;
     var m = typeof chat_metadata !== 'undefined' ? chat_metadata : (typeof window !== 'undefined' ? window.chat_metadata : null);
     if (!m) return;
     if (!m[STORAGE_KEY]) m[STORAGE_KEY] = {};
@@ -35,9 +75,11 @@ function savePhoneData(shouldSave) {
     }
 }
 
-function getEmptyPhoneData() {
-    return { contacts:[], messages:[], phoneCalls:[], social:{feed:[],savedPosts:[]},
-        browser:{tabs:[],activeTabId:null,bookmarks:[],history:[]}, _activeApp:'phone', _nextSeq:1 };
+function resetPhoneData() {
+    phoneData = getEmptyPhoneData();
+    activeApp = 'phone';
+    activeContactId = null;
+    savePhoneData();
 }
 
 function randId() { return Date.now().toString(36) + Math.random().toString(36).substring(2,9); }
@@ -45,7 +87,178 @@ function fmtTime(ts) { return new Date(ts).toLocaleTimeString([],{hour:'2-digit'
 function fmtAgo(ts) { var d=Date.now()-ts; if(d<6e4) return 'just now'; if(d<36e5) return Math.floor(d/6e4)+'m'; if(d<864e5) return fmtTime(ts); return new Date(ts).toLocaleDateString(); }
 
 // ============================================================
-// EVENT SYNC — per-chat isolation
+// STORY INTEGRATION
+// ============================================================
+function injectMessageToStory(text, direction, contactName) {
+    if (!getSettings().addToStory) return;
+    if (typeof chat === 'undefined' || !Array.isArray(chat)) return;
+
+    var user = (typeof name1 !== 'undefined') ? name1 : 'You';
+    var char = contactName || ((typeof name2 !== 'undefined') ? name2 : 'Unknown');
+    
+    var storyText;
+    if (direction === 'sent') {
+        storyText = `[📱 You sent ${char} a text: "${text}"]`;
+    } else {
+        storyText = `[📱 ${char} texted you: "${text}"]`;
+    }
+
+    // Push to ST's chat array as a system message
+    var sysMsg = {
+        is_system: true,
+        is_user: false,
+        mes: storyText,
+        extra: { display_text: storyText },
+        send_date: new Date().toLocaleString(),
+        creates: []
+    };
+    chat.push(sysMsg);
+
+    // Trigger ST UI update if available
+    if (typeof addOneMessage === 'function') {
+        addOneMessage(sysMsg, { type: 'system', chat: chat.length - 1, force: true, power: 2 });
+    } else if (typeof reloadMessage === 'function') {
+        reloadMessage(chat.length - 1);
+    }
+    
+    // Ensure it's saved
+    if (typeof saveChatConditional === 'function') saveChatConditional();
+}
+
+// ============================================================
+// AUTO-CONTACT DETECTION
+// ============================================================
+function autoDetectContact() {
+    var charName = (typeof name2 !== 'undefined') ? name2 : null;
+    if (typeof characters !== 'undefined' && typeof this_chid !== 'undefined' && characters[this_chid]) {
+        charName = characters[this_chid].name || charName;
+    }
+    if (!charName) return;
+
+    var existing = phoneData.contacts.find(function(c){ return c.isCharacter; });
+    if (existing) {
+        if (existing.name !== charName) {
+            existing.name = charName;
+            activeContactId = existing.id;
+            savePhoneData();
+            renderUI();
+        }
+        return;
+    }
+
+    var contact = { id: randId(), name: charName, phone: 'N/A', avatar: '', isCharacter: true };
+    phoneData.contacts.push(contact);
+    activeContactId = contact.id;
+    savePhoneData();
+    renderUI();
+    console.log('[Phone Extension] Auto-detected ST character as contact:', charName);
+}
+
+// ============================================================
+// NPC AUTO-TEXT ENGINE
+// ============================================================
+var npcTimer = null;
+
+function startNpcAutoTextEngine() {
+    stopNpcAutoTextEngine();
+    if (!getSettings().npcAutoTexts) return;
+
+    var ms = getSettings().npcTextFrequency * 60000;
+    npcTimer = setInterval(triggerNpcAutoText, ms);
+    console.log('[Phone Extension] NPC auto-text engine started (every ' + getSettings().npcTextFrequency + 'm)');
+}
+
+function stopNpcAutoTextEngine() {
+    if (npcTimer) { clearInterval(npcTimer); npcTimer = null; }
+}
+
+function triggerNpcAutoText() {
+    if (!getSettings().npcAutoTexts) return;
+    var contact = phoneData.contacts.find(function(c){ return c.isCharacter; });
+    if (!contact) return;
+
+    // Prevent if chatting happened recently (e.g., within 2 mins)
+    var lastChat = getLastChatTimestamp();
+    if (Date.now() - lastChat < 120000) return;
+
+    generateNpcText(contact);
+}
+
+function getLastChatTimestamp() {
+    if (typeof chat !== 'undefined' && chat.length > 0) {
+        var last = chat[chat.length - 1];
+        if (last && last.send_date) {
+            return new Date(last.send_date).getTime();
+        }
+    }
+    return Date.now() - 3600000; // Fallback: 1 hr ago
+}
+
+async function generateNpcText(contact) {
+    var user = (typeof name1 !== 'undefined') ? name1 : 'You';
+    var charName = contact.name;
+    var systemPrompt = `You are ${charName}. You are texting the user on a phone. Keep the message short, casual, and in character. Max 20 words.`;
+    var context = `The last thing you chatted about was a while ago. Text ${user} something relevant to your personality.`;
+
+    try {
+        var res = await fetch('/api/chat/completions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer no-key-needed-for-localhost' },
+            body: JSON.stringify({
+                messages: [
+                    { role: 'system', content: systemPrompt },
+                    { role: 'user', content: context }
+                ],
+                max_tokens: 50,
+                temperature: 1.0
+            })
+        });
+        var data = await res.json();
+        if (data && data.choices && data.choices[0] && data.choices[0].message) {
+            var text = data.choices[0].message.content.replace(/^["']|["']$/g,'').substring(0, 140);
+            receiveNpcText(contact, text);
+            return;
+        }
+    } catch (e) {
+        console.warn('[Phone Extension] LLM text generation failed:', e.message);
+    }
+
+    // Fallback: contextual generic
+    var fallbacks = [
+        "Hey, just thinking about you.", "What are you up to?", "Miss our last chat.",
+        "Random thought: the world's weird, huh?", "Coffee? 🍵", "How's your day going?",
+        "Sent you a meme, check it later. 😂"
+    ];
+    receiveNpcText(contact, fallbacks[Math.floor(Math.random()*fallbacks.length)]);
+}
+
+function receiveNpcText(contact, text) {
+    phoneData.messages.push({
+        id: randId(), contactId: contact.id, text: text,
+        direction: 'received', timestamp: Date.now()
+    });
+    savePhoneData();
+    injectMessageToStory(text, 'received', contact.name);
+    
+    // Show notification if enabled and not currently in messages
+    if (getSettings().notifications && activeApp !== 'messages') {
+        if (typeof toastr !== 'undefined') {
+            toastr.info(`${contact.name}: ${text.substring(0,30)}${text.length>30?'...':''}`, '📱 New Text');
+        }
+    }
+
+    // Update UI if messages app open
+    if (activeContactId === contact.id && activeApp === 'messages') {
+        renderUI();
+    } else {
+        // Update dock badge or pulse if implemented
+        var dock = document.querySelector('[data-dock="messages"]');
+        if (dock) dock.style.color = '#ff4444';
+    }
+}
+
+// ============================================================
+// EVENT SYNC
 // ============================================================
 if (typeof eventSource !== 'undefined' && typeof event_types !== 'undefined') {
     eventSource.on(event_types.CHAT_CHANGED, function() {
@@ -55,7 +268,17 @@ if (typeof eventSource !== 'undefined' && typeof event_types !== 'undefined') {
         activeContactId = null;
         activeSocialTab = 'feed';
         renderUI();
+        autoDetectContact();
+        startNpcAutoTextEngine();
     });
+    eventSource.on(event_types.USER_MESSAGE_RENDERED, onChatActivity);
+    eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, onChatActivity);
+}
+
+function onChatActivity() {
+    autoDetectContact();
+    // Cooldown reset: recent chat means less urgent to auto-text
+    getSettings().lastAutoText = Date.now();
 }
 
 // ============================================================
@@ -79,7 +302,7 @@ var PhoneApp = {
                 .map(function(c) {
                     var co = phoneData.contacts.find(function(x){return x.id===c.contactId});
                     var nm = co ? co.name : 'Unknown';
-                    var ph = co ? co.phone : 'Unknown number';
+                    var ph = co ? co.phone : 'Unknown';
                     var ic = c.status==='missed' ? 'fa-circle-xmark pcm' : c.type==='outgoing' ? 'fa-arrow-up pco' : 'fa-arrow-down pci';
                     return '<div class="pii">' +
                         '<div class="pav"><i class="fa-solid '+ic+'"></i></div>' +
@@ -110,24 +333,29 @@ var PhoneApp = {
             '<div class="pss" data-section="recent">'+recent+'</div>' +
             '<div class="pss" data-section="contacts">'+contacts+'</div></div>';
     },
-    addDigit: function(k) { if(this._dialPad.length<15){this._dialPad+=k;var e=document.getElementById('pdt');} },
-    backspace: function() { this._dialPad=this._dialPad.slice(0,-1); var e=document.getElementById('pdt'); },
+    addDigit: function(k) { if(this._dialPad.length<15){this._dialPad+=k;var e=document.getElementById('pdt');if(e)e.textContent+=k;} },
+    backspace: function() { this._dialPad=this._dialPad.slice(0,-1); var e=document.getElementById('pdt'); if(e)e.textContent=this._dialPad||' '; },
     startCall: function() {
-        var num=this._dialPad.trim(); if(!num){toastr.info('Enter a number');return;}
+        var num=this._dialPad.trim(); if(!num){if(typeof toastr!=='undefined')toastr.info('Enter a number');return;}
         var co=phoneData.contacts.find(function(c){return c.phone===num;});
-        if(!co){co={id:randId(),name:num,phone:num};phoneData.contacts.push(co);toastr.info(num+' added to contacts');}
+        if(!co){co={id:randId(),name:num,phone:num};phoneData.contacts.push(co);}
         var call={id:randId(),contactId:co.id,type:'outgoing',duration:0,status:'answered',timestamp:Date.now()};
         phoneData.phoneCalls.push(call); savePhoneData();
         var dur=20+Math.floor(Math.random()*260);
-        setTimeout(function(){call.duration=dur;savePhoneData();renderUI();toastr.success('Call with '+co.name+' ('+dur+'s)');},2000);
-        this._dialPad='';
+        var self=this;
+        setTimeout(function(){call.duration=dur;savePhoneData();renderUI();
+            if(typeof toastr!=='undefined') toastr.success('Call with '+co.name+' ('+dur+'s)');
+            self._dialPad=''; document.getElementById('pdt').textContent=' ';
+        },2000);
     },
     callContact: function(cid) {
         var co=phoneData.contacts.find(function(c){return c.id===cid;});if(!co)return;
         var call={id:randId(),contactId:co.id,type:'outgoing',duration:0,status:'answered',timestamp:Date.now()};
         phoneData.phoneCalls.push(call); savePhoneData();
         var dur=10+Math.floor(Math.random()*300);
-        setTimeout(function(){call.duration=dur;savePhoneData();renderUI();toastr.success('Call with '+co.name+' ('+dur+'s)');},2000);
+        setTimeout(function(){call.duration=dur;savePhoneData();renderUI();
+            if(typeof toastr!=='undefined') toastr.success('Call with '+co.name+' ('+dur+'s)');
+        },2000);
     },
     clearCalls: function() { phoneData.phoneCalls=[];savePhoneData();renderUI(); }
 };
@@ -180,8 +408,8 @@ var MessagesApp = {
         for(var mi=0;mi<msgs.length;mi++){
             var m=msgs[mi];
             var cls=m.direction==='sent'?'sent':'received';
-            html+='<div class="pm '+cls+'" style="justify-content:'+(m.direction==='sent'?'flex-end':'flex-start')+'">' +
-                '<div class="pbub"><span class="ptx">'+m.text+'</span></div>' +
+            html+='<div class="pm '+cls+'">' +
+                '<div class="pbub"><span class="ptx">'+this._escapeHtml(m.text)+'</span></div>' +
                 '<span class="ptm">'+fmtTime(m.timestamp)+'</span></div>';
         }
         return '<div class="pch">'+co.name+'</div>' +
@@ -189,22 +417,27 @@ var MessagesApp = {
             '<div class="pinbar"><input class="ptxt" id="pmi" placeholder="Type a message..." />' +
             '<button class="psbtn" data-send-c="'+activeContactId+'"><i class="fa-solid fa-paper-plane"></i></button></div>';
     },
+    _escapeHtml: function(t) { return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); },
     sendMsg: function(cid) {
         var inp=document.getElementById('pmi');
         var txt=inp?inp.value.trim():'';if(!txt)return;
+        
         phoneData.messages.push({id:randId(),contactId:cid,text:txt,direction:'sent',timestamp:Date.now()});
-        savePhoneData();renderUI();
+        savePhoneData();
+        
         var co=phoneData.contacts.find(function(c){return c.id===cid;});
-        if(co){
-            var replies=["Got it! \uD83D\uDC4D","Interesting...","Tell me more!","Okay cool","Haha nice \uD83D\uDE02",
-                "I'll think about it","Sure thing!","No way!","That's wild","LOL","Sounds good to me \uD83D\uDD99",
-                "Yeah definitely","Hmm let me check","On my way!"];
-            setTimeout(function(){
-                var r=replies[Math.floor(Math.random()*replies.length)];
-                phoneData.messages.push({id:randId(),contactId:cid,text:r,direction:'received',timestamp:Date.now()});
-                savePhoneData();renderUI();
-                setTimeout(function(){var el=document.getElementById('pmsgs');if(el)el.scrollTop=el.scrollHeight;},50);
-            },1000+Math.random()*2000);
+        if(co) {
+            injectMessageToStory(txt, 'sent', co.name);
+            renderUI();
+            // Trigger auto-reply engine after user text
+            if(getSettings().npcAutoTexts) {
+                var self=this;
+                setTimeout(function(){
+                    generateNpcText(co);
+                }, 2000 + Math.random()*3000);
+            }
+        } else {
+            renderUI();
         }
     }
 };
@@ -239,7 +472,7 @@ var SocialApp = {
         return html;
     },
     _renderPost: function(post, isSaved) {
-        var content = post.content.replace(/\n/g,'<br>');
+        var content = (post.content||'').replace(/\n/g,'<br>');
         var heartClass = 'fa-regular fa-heart' + (post.liked?' fa-solid tpink':'');
         var rtClass = 'fa-regular fa-retweet' + (post.retweeted?' fa-solid tgreen':'');
         var savedIcon = isSaved ? '<i class="fa-solid fa-bookmark pbsave" style="color:#4fc3f7"></i>' : '';
@@ -269,7 +502,8 @@ var SocialApp = {
             id:randId(),author:'Me',authorHandle:'@user',content:inp.value.trim(),
             images:[],likes:0,retweets:0,timestamp:Date.now(),liked:false,retweeted:false,
         });
-        savePhoneData();renderUI();toastr.success('Post published!');
+        savePhoneData();renderUI();
+        if(typeof toastr!=='undefined') toastr.success('Post published!');
     },
     likePost: function(pid) {
         var arr=phoneData.social.feed.concat(phoneData.social.savedPosts);
@@ -285,8 +519,8 @@ var SocialApp = {
         var fed=phoneData.social.feed,sav=phoneData.social.savedPosts;
         var all=fed.concat(sav);
         var p=all.find(function(x){return x.id===pid});if(!p)return;
-        var fromFeed=fed.indexOf(p)>-1;
-        if(fromFeed){var i=fed.indexOf(p);if(i>-1)fed.splice(i,1);sav.push({});}
+        var fromFed=fed.indexOf(p)>-1;
+        if(fromFed){fed.splice(fed.indexOf(p),1);sav.push(JSON.parse(JSON.stringify(p)));}
         else{var i=sav.indexOf(p);if(i>-1)sav.splice(i,1);fed.push(p);}
         savePhoneData();renderUI();
     }
@@ -330,12 +564,10 @@ var BrowserApp = {
     },
     _newTab: function() {
         var links=[
-            {n:'Wikipedia',u:'w:Wikipedia',c:'#636363',i:'fa-brands fa-wikipedia-w'},
+            {n:'Wiki',u:'w:Wikipedia',c:'#636363',i:'fa-brands fa-wikipedia-w'},
             {n:'Example',u:'w:Example',c:'#2aa198',i:'fa-solid fa-paragraph'},
             {n:'News',u:'w:News',c:'#dc322f',i:'fa-solid fa-newspaper'},
-            {n:'Weather',u:'w:Weather',c:'#268bd2',i:'fa-solid fa-cloud-sun'},
-            {n:'Sports',u:'w:Sports',c:'#859900',i:'fa-solid fa-futbol'},
-            {n:'Technology',u:'w:Technology',c:'#6c71c4',i:'fa-solid fa-microchip'},
+            {n:'Tech',u:'w:Technology',c:'#6c71c4',i:'fa-solid fa-microchip'},
         ];
         var lk='';
         for(var li=0;li<links.length;li++){
@@ -343,9 +575,7 @@ var BrowserApp = {
                 '<div class="qli" style="background:'+links[li].c+'"><i class="'+links[li].i+'"></i></div><span>'+links[li].n+'</button>';
         }
         return '<div class="ntp"><h2><i class="fa-solid fa-globe"></i> Quick Browse</h2>' +
-            '<div class="qlinks">'+lk+'</div>' +
-            '<div class="sbox"><input class="sinput" id="bsearch" placeholder="Search Wikipedia..." />' +
-            '<button class="sbtn" data-search="true"><i class="fa-solid fa-search"></i></button></div></div>';
+            '<div class="qlinks">'+lk+'</div></div>';
     },
     openNewTab: function() {
         var id=randId();
@@ -357,28 +587,61 @@ var BrowserApp = {
         tab.url=url;
         if(url.startsWith('w:')){
             tab.title=url.substring(2);
-            tab.html='<div class="wpage"><div class="ws"><i class="fa-solid fa-spinner fa-spin"></i> Loading <b>'+url.substring(2)+'</b>...</div></div>';
-        } else if (url.match(/^https?:\/\//)) {
-            tab.title=url;
-            tab.html='<iframe src="'+url+'" class="extframe" sandbox="allow-scripts allow-same-origin allow-forms"></iframe>';
+            tab.html='<div class="wpage"><div class="ws">Loading <b>'+url.substring(2)+'</b>...</div></div>';
         } else {
             tab.title=url;
-            tab.html='<div class="wpage"><div class="ws">Loading page: <b>'+url+'</b>...</div></div>';
+            tab.html='<div class="wpage">Navigating to: '+url+'</div>';
         }
         phoneData.browser.history.push({id:randId(),url:url,title:tab.title,ts:Date.now()});
         savePhoneData();renderUI();
     },
     bookmarkUrl: function() {
         var tab=phoneData.browser.tabs.find(function(t){return t.id===phoneData.browser.activeTabId;});
-        if(!tab||!tab.url){toastr.info('Navigate to a page first');return;}
-        if(!phoneData.browser.bookmarks.includes(tab.url)){
-            phoneData.browser.bookmarks.push(tab.url);savePhoneData();toastr.success('Bookmarked!');
-        } else {toastr.info('Already bookmarked');}
+        if(!tab||!tab.url){if(typeof toastr!=='undefined')toastr.info('Navigate first');return;}
+        var bm=phoneData.browser.bookmarks;
+        if(!bm.includes(tab.url)){bm.push(tab.url);savePhoneData();if(typeof toastr!=='undefined')toastr.success('Bookmarked');}
     }
 };
 
 // ============================================================
-// MAIN RENDER
+// SETTINGS APP
+// ============================================================
+var SettingsApp = {
+    render: function() {
+        var s = getSettings();
+        return '<div class="pa">' +
+            '<div class="pa-header"><span class="pa-title"><i class="fa-solid fa-gear"></i> Settings</span></div>' +
+            '<div class="sett">' +
+            this._toggle('addToStory', 'Add texts to chat story', 'Inject phone messages into the main chat for context.') +
+            this._toggle('npcAutoTexts', 'Enable NPC auto-texts', 'Let the character text you on their own.') +
+            this._select('npcTextFrequency', 'Auto-text interval', [
+                {v:2,l:'Every 2 min'}, {v:5,l:'Every 5 min'}, {v:10,l:'Every 10 min'}, {v:20,l:'Every 20 min'}
+            ], s.npcTextFrequency) +
+            this._toggle('notifications', 'Notifications', 'Show toast alerts for new texts.') +
+            '<button class="sbtn" data-reset="true"><i class="fa-solid fa-trash-can"></i> Reset Phone Data</button>' +
+            '</div></div>';
+    },
+    _toggle: function(key, label, desc) {
+        var s = getSettings();
+        var checked = s[key] ? 'checked' : '';
+        return '<div class="sett-item">' +
+            '<label class="sett-label"><input type="checkbox" class="sett-chk" data-set="'+key+'" '+checked+'>' +
+            '<span>'+label+'</span></label>' +
+            '<small>'+desc+'</small></div>';
+    },
+    _select: function(key, label, opts, curr) {
+        var html = '<div class="sett-item"><label class="sett-label"><span>'+label+'</span>' +
+            '<select class="sett-sel" data-set="'+key+'">';
+        for(var i=0;i<opts.length;i++) {
+            var sel = (parseFloat(opts[i].v)===parseFloat(curr)) ? 'selected' : '';
+            html += '<option value="'+opts[i].v+'" '+sel+'>'+opts[i].l+'</option>';
+        }
+        return html + '</select></label></div>';
+    }
+};
+
+// ============================================================
+// MAIN RENDER & UI LOOP
 // ============================================================
 function renderBody() {
     switch(activeApp){
@@ -386,10 +649,7 @@ function renderBody() {
         case 'messages': return MessagesApp.render();
         case 'social': return SocialApp.render();
         case 'browser': return BrowserApp.render();
-        case 'settings':
-            return '<div class="pa"><div class="pa-header"><span class="pa-title"><i class="fa-solid fa-gear"></i> Settings</span></div>' +
-                '<div class="sett"><button class="sbtn" data-reset="true"><i class="fa-solid fa-trash-can"></i> Reset All Phone Data</button>' +
-                '<small>Clears all phone data for this chat.</small></div></div>';
+        case 'settings': return SettingsApp.render();
         default: return PhoneApp.render();
     }
 }
@@ -407,6 +667,7 @@ function updateDock() {
     var btns=document.querySelectorAll('.dock-btn');
     for(var bi=0;bi<btns.length;bi++){
         btns[bi].classList.toggle('active',btns[bi].dataset.dock===activeApp);
+        if(btns[bi].dataset.dock==='messages') btns[bi].style.color=''; // Clear alert color
     }
 }
 
@@ -417,16 +678,21 @@ function bindEvents() {
     // Dock
     var dockBtns = document.querySelectorAll('.dock-btn');
     for(var bi=0;bi<dockBtns.length;bi++){
-        (function(b){b.onclick=function(){activeApp=b.dataset.dock;
+        (function(b){b.onclick=function(){
+            activeApp=b.dataset.dock;
             if(activeApp!=='messages')activeContactId=null;
-            if(activeApp!=='social')activeSocialTab='feed';renderUI();};})(dockBtns[bi]);
+            if(activeApp!=='social')activeSocialTab='feed';
+            if(activeApp==='settings')stopNpcAutoTextEngine();
+            if(activeApp==='settings' && phoneData._activeApp !== 'settings') startNpcAutoTextEngine();
+            renderUI();
+        };})(dockBtns[bi]);
     }
 
     // Phone
     var keys = document.querySelectorAll('[data-key]');
-    for(var ki=0;ki<keys.length;ki++){(function(b){b.onclick=function(){PhoneApp.addDigit(b.dataset.key);};})(keys[ki]);}
+    for(var ki=0;ki<keys.length;ki++){(function(b){b.onclick=function(){PhoneApp.addDigit(b.dataset.key);document.getElementById('pdt').textContent=PhoneApp._dialPad;};})(keys[ki]);}
     var backBtns = document.querySelectorAll('[data-backspace]');
-    for(var bi2=0;bi2<backBtns.length;bi2++){(function(b){b.onclick=function(){PhoneApp.backspace();};})(backBtns[bi2]);}
+    for(var bi2=0;bi2<backBtns.length;bi2++){(function(b){b.onclick=function(){PhoneApp.backspace();document.getElementById('pdt').textContent=PhoneApp._dialPad;};})(backBtns[bi2]);}
     var callBtns = document.querySelectorAll('[data-call]');
     for(var ci=0;ci<callBtns.length;ci++){(function(b){b.onclick=function(){PhoneApp.startCall();};})(callBtns[ci]);}
     var clearBtn = document.querySelector('[data-clear-calls]');
@@ -472,39 +738,51 @@ function bindEvents() {
         savePhoneData();renderUI();}})(closeBtns[cbI]);}
     var goBtn = document.querySelector('[data-gourl]');
     if(goBtn) goBtn.onclick=function(){var u=document.getElementById('burl');if(u&&phoneData.browser.activeTabId)BrowserApp.navigateTo(phoneData.browser.activeTabId,u.value);};
-    
     var mkBtn = document.querySelector('[data-bookmark]');
     if(mkBtn) mkBtn.onclick=function(){BrowserApp.bookmarkUrl();};
-    
     var navBtns = document.querySelectorAll('[data-nav]');
     for(var nvI=0;nvI<navBtns.length;nvI++){(function(el){el.onclick=function(){if(phoneData.browser.activeTabId)BrowserApp.navigateTo(phoneData.browser.activeTabId,el.dataset.nav);}})(navBtns[nvI]);}
-    
-    var searchBtn = document.querySelector('[data-search]');
-    if(searchBtn) searchBtn.onclick=function(){var s=document.getElementById('bsearch');
-        if(s&&phoneData.browser.activeTabId)BrowserApp.navigateTo(phoneData.browser.activeTabId,'w:'+s.value);};
-        
     var urlBarBtn = document.querySelector('[data-urlbar]');
     if(urlBarBtn) urlBarBtn.onclick=function(){var bar=document.getElementById('pbar');
         if(bar) bar.style.display=bar.style.display==='flex'?'none':'flex';};
 
     // Settings
+    document.querySelectorAll('[data-set]').forEach(function(el){
+        if(el.type==='checkbox') {
+            el.onchange = function(){
+                phoneData.settings[el.dataset.set] = el.checked;
+                savePhoneData();
+                if(el.dataset.set === 'npcTextFrequency' || el.dataset.set === 'npcAutoTexts') startNpcAutoTextEngine();
+            };
+        } else if (el.tagName === 'SELECT') {
+            el.onchange = function(){
+                phoneData.settings[el.dataset.set] = parseFloat(el.value);
+                savePhoneData();
+                startNpcAutoTextEngine();
+            };
+        }
+    });
+
     var resetBtn = document.querySelector('[data-reset]');
     if(resetBtn) resetBtn.onclick=function(){if(confirm('Reset ALL phone data for this chat?')){
-        phoneData=getEmptyPhoneData();savePhoneData();renderUI();toastr.success('Phone data reset');}};
+        phoneData=getEmptyPhoneData();savePhoneData();renderUI();
+        if(typeof toastr!=='undefined') toastr.success('Phone data reset');}};
 
-    // Enter key shortcuts
+    // Enter keys
     document.addEventListener('keydown',function(e){
+        if(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA') return; // Don't hijack normal inputs
+    }, false);
+
+    document.querySelector('.pbody').addEventListener('keydown',function(e){
         var m=document.getElementById('pmi');
-        if(e.key==='Enter'&&m){var sb=document.querySelector('[data-send-c]');if(sb)MessagesApp.sendMsg(sb.dataset.sendC);}
+        if(e.key==='Enter'&&m&&!e.shiftKey){e.preventDefault();var sb=document.querySelector('[data-send-c]');if(sb)MessagesApp.sendMsg(sb.dataset.sendC);}
         var u=document.getElementById('burl');
-        if(e.key==='Enter'&&u&&phoneData.browser.activeTabId){BrowserApp.navigateTo(phoneData.browser.activeTabId,u.value);}
-        var s=document.getElementById('bsearch');
-        if(e.key==='Enter'&&s&&phoneData.browser.activeTabId){BrowserApp.navigateTo(phoneData.browser.activeTabId,'w:'+s.value);}
-    },true);
+        if(e.key==='Enter'&&u&&phoneData.browser.activeTabId){e.preventDefault();BrowserApp.navigateTo(phoneData.browser.activeTabId,u.value);}
+    }, true);
 }
 
 // ============================================================
-// INIT
+// INJECTION & INIT
 // ============================================================
 function injectPhone() {
     if(document.getElementById('phone-wrap'))return;
@@ -521,61 +799,36 @@ function injectPhone() {
         '<button class="dock-btn" data-dock="browser"><i class="fa-solid fa-globe"></i></button>' +
         '<button class="dock-btn" data-dock="settings"><i class="fa-solid fa-gear"></i></button>' +
         '</div></div>';
-    // Force explicit positioning to bypass CSS conflicts
-    wrap.style.position='fixed';
-    wrap.style.bottom='0px';
-    wrap.style.right='20px';
-    wrap.style.width='360px';
-    wrap.style.height='680px';
-    wrap.style.zIndex='10000';
-
+    wrap.style.position='fixed'; wrap.style.bottom='0px'; wrap.style.right='20px';
+    wrap.style.width='360px'; wrap.style.height='680px'; wrap.style.zIndex='10000';
     document.body.appendChild(wrap);
 
     setTimeout(function(){
         phoneData=loadPhoneData();
         activeApp=phoneData._activeApp||'phone';
+        autoDetectContact();
         renderUI();
+        startNpcAutoTextEngine();
     },300);
 
     setTimeout(function(){
-        // Try multiple selectors for different ST layouts (desktop/mobile)
         var cont=document.getElementById('chatformbuttonssend')
-            ||document.getElementById('formbutton')
             ||document.getElementById('send_form')
             ||document.querySelector('#send_form .form-buttons')
-            ||document.querySelector('.bottom-bar')
-            ||document.querySelector('#move_send_buttons_div');
+            ||document.querySelector('.bottom-bar');
         var btn=document.createElement('button');btn.id='phone-toggle-btn';
-        btn.innerHTML='<i class="fa-solid fa-mobile-screen-button"></i>';
-        btn.title='Toggle Phone';
-        btn.onclick=function(){
-            wrap.classList.toggle('popen');
-            if(wrap.classList.contains('popen')){
-                renderUI();
-            }
-        };
-        if(cont){
-            cont.insertBefore(btn,cont.firstChild);
-        }else{
-            // Fallback: always create a floating toggle button (works on any layout)
+        btn.innerHTML='<i class="fa-solid fa-mobile-screen-button"></i>'; btn.title='Toggle Phone';
+        btn.onclick=function(){wrap.classList.toggle('popen');if(wrap.classList.contains('popen'))renderUI();};
+        if(cont) cont.insertBefore(btn,cont.firstChild);
+        else {
             if(!document.getElementById('phone-toggle-btn')){
-                btn.style.position='fixed';
-                btn.style.bottom='70px';
-                btn.style.right='12px';
-                btn.style.zIndex='9999';
-                btn.style.width='48px';
-                btn.style.height='48px';
-                btn.style.borderRadius='50%';
-                btn.style.background='rgba(79,195,247,.25)';
-                btn.style.border='1px solid rgba(79,195,247,.3)';
-                btn.style.color='#4fc3f7';
-                btn.style.fontSize='20px';
-                btn.style.cursor='pointer';
-                btn.style.backdropFilter='blur(8px)';
-                btn.style.boxShadow='0 4px 12px rgba(0,0,0,.4)';
-                btn.style.display='flex';
-                btn.style.alignItems='center';
-                btn.style.justifyContent='center';
+                btn.style.position='fixed'; btn.style.bottom='70px'; btn.style.right='12px';
+                btn.style.zIndex='9999'; btn.style.width='48px'; btn.style.height='48px';
+                btn.style.borderRadius='50%'; btn.style.background='rgba(79,195,247,.25)';
+                btn.style.border='1px solid rgba(79,195,247,.3)'; btn.style.color='#4fc3f7';
+                btn.style.fontSize='20px'; btn.style.cursor='pointer'; btn.style.backdropFilter='blur(8px)';
+                btn.style.boxShadow='0 4px 12px rgba(0,0,0,.4)'; btn.style.display='flex';
+                btn.style.alignItems='center'; btn.style.justifyContent='center';
                 document.body.appendChild(btn);
             }
         }
@@ -594,18 +847,12 @@ function injectPhone() {
         if(typeof toastr !== 'undefined'){
             initialized = true;
             injectPhone();
-            console.log('[Phone Extension] Initialized successfully');
+            console.log('[Phone Extension v0.2.0] Initialized');
         }
     }
-    // Try immediately
     tryInit();
-    // Poll for up to 10 seconds
     if(!initialized){
         var attempts = 0;
-        var poll = setInterval(function(){
-            attempts++;
-            tryInit();
-            if(attempts >= 100) clearInterval(poll);
-        }, 100);
+        var poll = setInterval(function(){ attempts++; tryInit(); if(attempts >= 100) clearInterval(poll); }, 100);
     }
 })();
