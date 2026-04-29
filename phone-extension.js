@@ -1030,12 +1030,20 @@ function bindEvents() {
     // Settings toggles (need change input, not click)
     var settings = document.querySelectorAll('[data-set].sett-chk');
     for(var i=0;i<settings.length;i++){(function(el){el.onchange=function(){
-        phoneData.settings[el.dataset.set]=el.checked; savePhoneData();
-        if(el.dataset.set==='npcTextFrequency'||el.dataset.set==='npcAutoTexts') startNpcAutoTextEngine();
+        var key = el.dataset.set;
+        phoneData.settings[key] = el.checked;
+        savePhoneData();
+        console.log('[Phone Extension] Setting changed: ' + key + ' = ' + el.checked);
+        if(key === 'npcAutoTexts') startNpcAutoTextEngine();
+        if(key === 'npcTextFrequency') startNpcAutoTextEngine();
     };})(settings[i]);}
     var selects = document.querySelectorAll('select.sett-sel');
     for(var j=0;j<selects.length;j++){(function(el){el.onchange=function(){
-        phoneData.settings[el.dataset.set]=parseFloat(el.value); savePhoneData(); startNpcAutoTextEngine();
+        var val = parseFloat(el.value);
+        phoneData.settings[el.dataset.set] = val;
+        savePhoneData();
+        console.log('[Phone Extension] Setting changed: ' + el.dataset.set + ' = ' + val);
+        startNpcAutoTextEngine();
     };})(selects[j]);}
 
     // Compose area character counter
