@@ -214,6 +214,8 @@ function scanChatForContacts() {
         console.log('[Phone Extension] Scanned chat: found ' + newContacts + ' new contact(s)');
         savePhoneData();
         renderUI();
+    } else {
+        console.log('[Phone Extension] Contact scan complete: 0 new, ' + phoneData.contacts.length + ' existing');
     }
 }
 
