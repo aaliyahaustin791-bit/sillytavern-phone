@@ -1136,10 +1136,11 @@ function injectPhone() {
 // ============================================================
 (function(){
     var initialized = false;
+    var scanRan = false;
     function tryInit(){
         if(initialized) return;
-        // Wait for ST to load critical globals before injecting
-        if(typeof toastr !== 'undefined' && typeof name2 !== 'undefined' && name2){
+        // Wait for toastr + eventSource = ST core is fully loaded
+        if(typeof toastr !== 'undefined' && typeof eventSource !== 'undefined'){
             initialized = true;
             injectPhone();
             console.log('[Phone Extension v0.2.0] Initialized');
@@ -1148,6 +1149,13 @@ function injectPhone() {
     tryInit();
     if(!initialized){
         var attempts = 0;
-        var poll = setInterval(function(){ attempts++; tryInit(); if(attempts >= 100) clearInterval(poll); }, 100);
+        var poll = setInterval(function(){
+            attempts++;
+            tryInit();
+            if(attempts >= 200) { // 20 seconds max
+                clearInterval(poll);
+                console.warn('[Phone Extension] give up waiting for ST globals');
+            }
+        }, 100);
     }
 })();
