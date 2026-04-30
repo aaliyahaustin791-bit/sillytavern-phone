@@ -133,46 +133,104 @@ function injectMessageToStory(text, direction, contactName) {
 
 /*
  * Builds a list of known SillyTavern character names to match against.
- * Uses `characters` array if available, falls back to `name2`.
+ * Scrapes DOM (sidebar, chat header, character cards) since ST globals
+ * are module-scoped in newer versions. Falls back to window.* globals.
  */
 function getKnownCharacterNames() {
     var names = new Set();
-    if (typeof characters !== 'undefined' && Array.isArray(characters)) {
-        for (var i = 0; i < characters.length; i++) {
-            if (characters[i] && characters[i].name) {
-                names.add(characters[i].name);
+
+    // 1. Scrape the character name from the chat header / top bar
+    var charHeader = document.querySelector('#character_name_animation')
+        || document.querySelector('#selected_chat_pane .mes_header .mes_name')
+        || document.querySelector('#character_name')
+        || document.querySelector('.open_menu .menu_character_name')
+        || document.querySelector('#char_name');
+    if (charHeader && charHeader.textContent.trim()) {
+        names.add(charHeader.textContent.trim());
+    }
+
+    // 2. Scrape character names from the sidebar character list
+    var charItems = document.querySelectorAll('.list-group-item .name', '.open_menu .open_list .name');
+    for (var ci = 0; ci < charItems.length; ci++) {
+        var n = charItems[ci].textContent.trim();
+        if (n && n.length > 1) names.add(n);
+    }
+
+    // 3. Scrape unique names from rendered message blocks (speaker names)
+    var msgNames = document.querySelectorAll('.mes .mes_name, .mes .fa-user-circle + span, .mes_author');
+    for (var ni = 0; ni < msgNames.length; ni++) {
+        var mn = msgNames[ni].textContent.trim();
+        if (mn && mn.length > 1) names.add(mn);
+    }
+
+    // 4. Also try window globals as fallback (for older ST versions)
+    try {
+        if (typeof window.characters !== 'undefined' && Array.isArray(window.characters)) {
+            for (var wi = 0; wi < window.characters.length; wi++) {
+                if (window.characters[wi] && window.characters[wi].name) {
+                    names.add(window.characters[wi].name);
+                }
             }
         }
-    }
-    if (typeof name2 !== 'undefined' && name2) {
-        names.add(name2);
-    }
-    return Array.from(names);
+    } catch(e) {}
+    try {
+        if (typeof window.name2 !== 'undefined' && window.name2) {
+            names.add(window.name2);
+        }
+    } catch(e) {}
+
+    var result = Array.from(names);
+    console.log('[Phone Extension] Found ' + result.length + ' character name(s) from DOM/window:', result);
+    return result;
 }
 
 /*
  * Scans the last N chat messages for character names (both spoken and mentioned).
  * Adds any new characters found as phone contacts.
+ * First tries DOM-scraping (rendered HTML), then falls back to JS chat array.
  */
 function scanChatForContacts() {
     var knownNames = getKnownCharacterNames();
-    if (!knownNames.length) return;
-
-    var chatHist = [];
-    if (typeof chat !== 'undefined' && Array.isArray(chat)) {
-        // Grab the last 50 messages for scanning
-        var start = Math.max(0, chat.length - 50);
-        for (var i = start; i < chat.length; i++) {
-            if (chat[i] && chat[i].mes) {
-                chatHist.push(chat[i].mes);
-            }
-        }
-    }
-    if (!chatHist.length) {
-        // No chat history — just add the main character as a contact
-        addOrUpdateContact(name2, true);
+    if (!knownNames.length) {
+        console.log('[Phone Extension] Scan skipped: no known character names found');
         return;
     }
+
+    // Build chat text history from multiple sources
+    var chatHist = [];
+
+    // Source A: Scrape text from rendered message blocks in the DOM
+    var msgBlocks = document.querySelectorAll('#chat .mes .mes_text, #chat_form .mes .mes_text, .mes .text');
+    for (var di = 0; di < msgBlocks.length; di++) {
+        var txt = msgBlocks[di].textContent || '';
+        if (txt.trim()) chatHist.push(txt.trim());
+    }
+
+    // Source B: Also grab the text from ST's chat array if available
+    try {
+        if (typeof window.chat !== 'undefined' && Array.isArray(window.chat)) {
+            var start = Math.max(0, window.chat.length - 80);
+            for (var ai = start; ai < window.chat.length; ai++) {
+                if (window.chat[ai] && window.chat[ai].mes) {
+                    chatHist.push(window.chat[ai].mes);
+                }
+            }
+        }
+    } catch(e) {}
+
+    if (!chatHist.length) {
+        console.log('[Phone Extension] No chat messages found in DOM or window.chat — trying character header');
+        // Last resort: add the character from the header
+        var charHeader = document.querySelector('#character_name_animation')
+            || document.querySelector('#character_name');
+        if (charHeader && charHeader.textContent.trim()) {
+            addOrUpdateContact(charHeader.textContent.trim(), true);
+        }
+        return;
+    }
+
+    // Keep only the last 50 entries to avoid over-scraping
+    if (chatHist.length > 50) chatHist = chatHist.slice(chatHist.length - 50);
 
     var found = new Set();
     var lowerKnown = {};
@@ -180,18 +238,19 @@ function scanChatForContacts() {
         lowerKnown[knownNames[ki].toLowerCase()] = knownNames[ki];
     }
 
+    console.log('[Phone Extension] Scanning ' + chatHist.length + ' message blocks against ' + knownNames.length + ' known names');
+
     for (var mi = 0; mi < chatHist.length; mi++) {
         var msg = chatHist[mi].toLowerCase();
         for (var ki2 = 0; ki2 < knownNames.length; ki2++) {
             var nm = knownNames[ki2];
-            // Match the character name as a whole word (with word boundaries)
             var re = new RegExp('\\b' + nm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'i');
-            if (re.test(msg)) {
+            if (re.test(chatHist[mi])) {
                 found.add(nm);
             }
         }
-        // Also try to extract names from common patterns like "@Name", "Name said", etc.
-        var extractRe = /(?:@|"|\'|\s|^)([A-Z][a-zA-Z\s]{1,20})(?:\b(?:said|replied|texted|walked|looked|asked|smiled|laughed| nodded|whispered|shouted|spoke))?/g;
+        // Also try to extract names from patterns like "@Name said", "Name texted"
+        var extractRe = /(?:@|"|\'|\s|^)([A-Z][a-zA-Z]{1,30})(?:\b\s+(?:said|replied|texted|walked|looked|asked|smiled|laughed|nodded|whispered|shouted|spoke|hugs?|kisses?|sighs|grins))/gi;
         var m;
         while ((m = extractRe.exec(chatHist[mi])) !== null) {
             var candidate = m[1].replace(/["'@\s]/g, '').trim();
@@ -200,6 +259,16 @@ function scanChatForContacts() {
             }
         }
     }
+
+    // Add the active character as main contact (from header)
+    try {
+        var activeChar = document.querySelector('#character_name_animation')
+            || document.querySelector('#character_name');
+        if (activeChar && activeChar.textContent.trim()) {
+            var cn = activeChar.textContent.trim();
+            addOrUpdateContact(cn, true);
+        }
+    } catch(e) {}
 
     // Add all found characters as contacts
     var newContacts = 0;
