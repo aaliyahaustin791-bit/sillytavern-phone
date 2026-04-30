@@ -403,23 +403,7 @@ function triggerNpcFollowUpText() {
 // Backwards-compatible alias — in case old code references it
 var autoDetectContact = scanChatForContacts;
 
-// ============================================================
-// EVENT SYNC
-// ============================================================
-if (typeof eventSource !== 'undefined' && typeof event_types !== 'undefined') {
-    eventSource.on(event_types.CHAT_CHANGED, function() {
-        savePhoneData(true);
-        phoneData = loadPhoneData();
-        activeApp = phoneData._activeApp || 'phone';
-        activeContactId = null;
-        activeSocialTab = 'feed';
-        renderUI();
-        scanChatForContacts();
-        startNpcAutoTextEngine();
-    });
-    eventSource.on(event_types.USER_MESSAGE_RENDERED, onUserMessage);
-    eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, onCharacterMessage);
-}
+// NOTE: Event listeners are registered via jQuery DOM-ready at the bottom.
 
 function onUserMessage() {
     scanChatForContacts();
@@ -1132,30 +1116,36 @@ function injectPhone() {
 }
 
 // ============================================================
-// AUTO-START
+// AUTO-START — jQuery DOM-ready (standard ST extension pattern)
 // ============================================================
-(function(){
-    var initialized = false;
-    var scanRan = false;
-    function tryInit(){
-        if(initialized) return;
-        // Wait for toastr + eventSource = ST core is fully loaded
-        if(typeof toastr !== 'undefined' && typeof eventSource !== 'undefined'){
-            initialized = true;
-            injectPhone();
-            console.log('[Phone Extension v0.2.0] Initialized');
-        }
+$(function(){
+    var _windowEventSource = window.eventSource;
+    var _windowEventTypes = typeof window.event_types !== 'undefined' ? window.event_types : null;
+    var _windowChat = window.chat;
+    var _windowCharacters = typeof window.characters !== 'undefined' ? window.characters : null;
+    var _windowName2 = typeof window.name2 !== 'undefined' ? window.name2 : null;
+
+    console.log('[Phone Extension v0.2.0] jQuery ready — eventSource:', !!_windowEventSource,
+        'chat:', _windowChat ? _windowChat.length : 'n/a', 'name2:', _windowName2, 'chars:', _windowCharacters ? _windowCharacters.length : 'n/a');
+
+    injectPhone();
+
+    // Register event listeners once ST core is fully loaded
+    if (_windowEventSource && _windowEventTypes) {
+        _windowEventSource.on(_windowEventTypes.CHAT_CHANGED, function() {
+            savePhoneData(true);
+            phoneData = loadPhoneData();
+            activeApp = phoneData._activeApp || 'phone';
+            activeContactId = null;
+            activeSocialTab = 'feed';
+            renderUI();
+            scanChatForContacts();
+            startNpcAutoTextEngine();
+        });
+        _windowEventSource.on(_windowEventTypes.USER_MESSAGE_RENDERED, onUserMessage);
+        _windowEventSource.on(_windowEventTypes.CHARACTER_MESSAGE_RENDERED, onCharacterMessage);
+        console.log('[Phone Extension] Event listeners registered');
+    } else {
+        console.warn('[Phone Extension] eventSource not available — events will not fire');
     }
-    tryInit();
-    if(!initialized){
-        var attempts = 0;
-        var poll = setInterval(function(){
-            attempts++;
-            tryInit();
-            if(attempts >= 200) { // 20 seconds max
-                clearInterval(poll);
-                console.warn('[Phone Extension] give up waiting for ST globals');
-            }
-        }, 100);
-    }
-})();
+});
