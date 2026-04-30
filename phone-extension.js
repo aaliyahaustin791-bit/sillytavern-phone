@@ -133,54 +133,77 @@ function injectMessageToStory(text, direction, contactName) {
 
 /*
  * Builds a list of known SillyTavern character names to match against.
- * Scrapes DOM (sidebar, chat header, character cards) since ST globals
- * are module-scoped in newer versions. Falls back to window.* globals.
+ * Uses ST API (version-agnostic) as primary source, then DOM scraping.
  */
 function getKnownCharacterNames() {
     var names = new Set();
 
-    // 1. Scrape the character name from the chat header / top bar
-    var charHeader = document.querySelector('#character_name_animation')
-        || document.querySelector('#selected_chat_pane .mes_header .mes_name')
-        || document.querySelector('#character_name')
-        || document.querySelector('.open_menu .menu_character_name')
-        || document.querySelector('#char_name');
-    if (charHeader && charHeader.textContent.trim()) {
-        names.add(charHeader.textContent.trim());
-    }
-
-    // 2. Scrape character names from the sidebar character list
-    var charItems = document.querySelectorAll('.list-group-item .name', '.open_menu .open_list .name');
-    for (var ci = 0; ci < charItems.length; ci++) {
-        var n = charItems[ci].textContent.trim();
-        if (n && n.length > 1) names.add(n);
-    }
-
-    // 3. Scrape unique names from rendered message blocks (speaker names)
-    var msgNames = document.querySelectorAll('.mes .mes_name, .mes .fa-user-circle + span, .mes_author');
-    for (var ni = 0; ni < msgNames.length; ni++) {
-        var mn = msgNames[ni].textContent.trim();
-        if (mn && mn.length > 1) names.add(mn);
-    }
-
-    // 4. Also try window globals as fallback (for older ST versions)
+    // 1. ST API: get currently active character card
     try {
-        if (typeof window.characters !== 'undefined' && Array.isArray(window.characters)) {
-            for (var wi = 0; wi < window.characters.length; wi++) {
-                if (window.characters[wi] && window.characters[wi].name) {
-                    names.add(window.characters[wi].name);
+        var xhr = new XMLHttpRequest();
+        xhr.open('POST', '/api/characters/get', false); // sync
+        xhr.setRequestHeader('Content-Type', 'application/json');
+        xhr.send(JSON.stringify({}));
+        if (xhr.status === 200) {
+            var data = JSON.parse(xhr.responseText);
+            if (data.name) names.add(data.name);
+            if (data.data && data.data.name) names.add(data.data.name);
+            console.log('[Phone Extension] API got current char:', data.name || data.data.name);
+        }
+    } catch(e) { console.log('[Phone Extension] API /api/characters/get failed:', e.message); }
+
+    // 2. ST API: list all loaded character cards
+    try {
+        var xhr2 = new XMLHttpRequest();
+        xhr2.open('GET', '/api/characters/list', false); // sync
+        xhr2.send();
+        if (xhr2.status === 200) {
+            var charList = JSON.parse(xhr2.responseText);
+            if (Array.isArray(charList)) {
+                for (var i2 = 0; i2 < charList.length; i2++) {
+                    var cn = typeof charList[i2] === 'string' ? charList[i2] : (charList[i2] && charList[i2].name);
+                    if (cn) names.add(cn);
                 }
             }
+            if (charList.length > 0) console.log('[Phone Extension] API got', charList.length, 'character(s)');
+        }
+    } catch(e) { console.log('[Phone Extension] API /api/characters/list failed:', e.message); }
+
+    // 3. DOM: try EVERY reasonable selector (covers all ST versions)
+    var domNames = document.querySelectorAll(
+        '.mes .mes_name, .mes .mes_header .name, .mes_author,' +
+        '#character_name_animation, #character_name, #char_name,' +
+        '.menu_character_name, .character-name, .char-name-text,' +
+        '#selected_chat_pane .name, .open_menu .name,' +
+        '.char-list-item .name, .character_list .name'
+    );
+    for (var di = 0; di < domNames.length; di++) {
+        var txt = domNames[di].textContent.trim().replace(/\s+/g, ' ');
+        if (txt && txt.length > 1 && txt.length < 60) names.add(txt);
+    }
+
+    // 4. Parse document title: "Character Name - SillyTavern"
+    try {
+        var parts = document.title.split(' - ');
+        if (parts.length > 1 && parts[0].trim().length > 1) {
+            names.add(parts[0].trim());
         }
     } catch(e) {}
+
+    // 5. Fallback: window globals (older ST)
     try {
-        if (typeof window.name2 !== 'undefined' && window.name2) {
-            names.add(window.name2);
+        if (typeof window.name2 !== 'undefined' && window.name2) names.add(window.name2);
+    } catch(e) {}
+    try {
+        if (typeof window.characters !== 'undefined' && Array.isArray(window.characters)) {
+            for (var ci = 0; ci < window.characters.length; ci++) {
+                if (window.characters[ci] && window.characters[ci].name) names.add(window.characters[ci].name);
+            }
         }
     } catch(e) {}
 
     var result = Array.from(names);
-    console.log('[Phone Extension] Found ' + result.length + ' character name(s) from DOM/window:', result);
+    console.log('[Phone Extension] Found ' + result.length + ' character name(s) (API+DOM+title):', result);
     return result;
 }
 
