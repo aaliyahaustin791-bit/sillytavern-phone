@@ -176,6 +176,16 @@
 /* Settings */
 .sett{padding:20px 0;}.sbtn{width:100%;padding:12px;border-radius:8px;border:1px solid rgba(244,67,54,.3);background:rgba(244,67,54,.1);color:#f44336;font-size:13px;cursor:pointer;margin-bottom:6px;}
 .sbtn:hover{background:rgba(244,67,54,.2);}
+/* Settings API inputs */
+.sett-input{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.15);border-radius:4px;padding:6px 8px;color:#e0e0e0;font-size:12px;outline:none;margin-top:2px;}
+.sett-input:focus{border-color:rgba(79,195,247,.5);}
+.sbtn-test{width:100%;padding:8px 12px;border-radius:6px;border:1px solid rgba(76,175,80,.4);background:rgba(76,175,80,.1);color:#4caf50;font-size:12px;cursor:pointer;margin-top:8px;}
+.sbtn-test:hover{background:rgba(76,175,80,.2);}
+.sbtn-scan{border-color:rgba(79,195,247,.3)!important;background:rgba(79,195,247,.1)!important;color:#4fc3f7!important;}
+.sbtn-scan:hover{background:rgba(79,195,247,.2)!important;}
+.sett-label{display:block;}.sett-label span{font-size:12px;font-weight:500;display:block;}
+.sett-label small{color:#888;font-size:10px;}
+.sett-input, .sett-sel{font-family:inherit;}
 
 /* Extension toggle button */
 #phone-toggle-btn{background:rgba(79,195,247,.15);color:#4fc3f7;border:1px solid rgba(79,195,247,.3);margin-right:4px;font-size:12px;padding:4px 8px;cursor:pointer;background:rgba(79,195,247,.25);backdrop-filter:blur(8px);}
