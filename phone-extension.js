@@ -142,29 +142,41 @@ function injectMessageToStory(text, direction, contactName) {
 
 /*
  * Builds a list of known SillyTavern character names to match against.
- * Uses ST API (version-agnostic) as primary source, then DOM scraping.
+ * Multi-source: modern ST APIs, DOM scraping, localStorage, window globals.
  */
 function getKnownCharacterNames() {
     var names = new Set();
 
-    // 1. ST API: get currently active character card
+    // 1. Modern ST API: /api/characters/active (newer ST versions)
+    try {
+        var xhrActive = new XMLHttpRequest();
+        xhrActive.open('GET', '/api/characters/active', false);
+        xhrActive.send();
+        if (xhrActive.status === 200) {
+            var activeData = JSON.parse(xhrActive.responseText);
+            if (activeData && activeData.name) names.add(activeData.name);
+            console.log('[Phone Extension] API /api/characters/active:', activeData.name);
+        }
+    } catch(e) { /* silent — not all ST versions have this */ }
+
+    // 2. Legacy ST API: /api/characters/get
     try {
         var xhr = new XMLHttpRequest();
-        xhr.open('POST', '/api/characters/get', false); // sync
+        xhr.open('POST', '/api/characters/get', false);
         xhr.setRequestHeader('Content-Type', 'application/json');
         xhr.send(JSON.stringify({}));
         if (xhr.status === 200) {
             var data = JSON.parse(xhr.responseText);
             if (data.name) names.add(data.name);
             if (data.data && data.data.name) names.add(data.data.name);
-            console.log('[Phone Extension] API got current char:', data.name || data.data.name);
+            console.log('[Phone Extension] API /api/characters/active:', data.name || data.data.name);
         }
-    } catch(e) { console.log('[Phone Extension] API /api/characters/get failed:', e.message); }
+    } catch(e) { /* silent */ }
 
-    // 2. ST API: list all loaded character cards
+    // 3. ST API: /api/characters/list
     try {
         var xhr2 = new XMLHttpRequest();
-        xhr2.open('GET', '/api/characters/list', false); // sync
+        xhr2.open('GET', '/api/characters/list', false);
         xhr2.send();
         if (xhr2.status === 200) {
             var charList = JSON.parse(xhr2.responseText);
@@ -174,32 +186,55 @@ function getKnownCharacterNames() {
                     if (cn) names.add(cn);
                 }
             }
-            if (charList.length > 0) console.log('[Phone Extension] API got', charList.length, 'character(s)');
         }
-    } catch(e) { console.log('[Phone Extension] API /api/characters/list failed:', e.message); }
+    } catch(e) { /* silent */ }
 
-    // 3. DOM: try EVERY reasonable selector (covers all ST versions)
-    var domNames = document.querySelectorAll(
-        '.mes .mes_name, .mes .mes_header .name, .mes_author,' +
-        '#character_name_animation, #character_name, #char_name,' +
+    // 4. DOM: modern selectors (ST v1.10+ / v1.12+)
+    var modernSelectors = [
+        '.mes .mes_name', '.mes .mes_header span:first-child',
+        '#character_header .name', '.char-name-element', '.display-name',
+        '.char-name', '#current_char_name', '.character-name-display',
+        '[data-character-name]', '.mes[data-id] .mes_name',
+        '#character_select .char-name', '.character-block .name',
+    ];
+    for (var mi = 0; mi < modernSelectors.length; mi++) {
+        var els = document.querySelectorAll(modernSelectors[mi]);
+        for (var ei = 0; ei < els.length; ei++) {
+            var txt = els[ei].textContent.trim().replace(/\s+/g, ' ');
+            if (txt && txt.length > 1 && txt.length < 60) names.add(txt);
+        }
+    }
+
+    // 5. Legacy DOM selectors
+    var legacyDom = document.querySelectorAll(
+        '.mes_author, #character_name_animation, #character_name, #char_name,' +
         '.menu_character_name, .character-name, .char-name-text,' +
-        '#selected_chat_pane .name, .open_menu .name,' +
-        '.char-list-item .name, .character_list .name'
+        '#selected_chat_pane .name, .open_menu .name'
     );
-    for (var di = 0; di < domNames.length; di++) {
-        var txt = domNames[di].textContent.trim().replace(/\s+/g, ' ');
+    for (var di = 0; di < legacyDom.length; di++) {
+        var txt = legacyDom[di].textContent.trim().replace(/\s+/g, ' ');
         if (txt && txt.length > 1 && txt.length < 60) names.add(txt);
     }
 
-    // 4. Parse document title: "Character Name - SillyTavern"
+    // 6. Parse message blocks for character name attribution (new in scan)
+    // ST renders character names in message attribution — try to extract from aria labels
+    var mesEls = document.querySelectorAll('.mes[data-author], [data-character], .mes .mes_header');
+    for (var ai = 0; ai < mesEls.length; ai++) {
+        var author = mesEls[ai].getAttribute('data-author') || mesEls[ai].getAttribute('data-character');
+        if (author && author.length > 1 && author.length < 60) names.add(author.trim());
+    }
+
+    // 7. Parse document title: "Character Name - SillyTavern" or just "Character Name"
     try {
-        var parts = document.title.split(' - ');
-        if (parts.length > 1 && parts[0].trim().length > 1) {
-            names.add(parts[0].trim());
-        }
+        var title = document.title;
+        var parts = title.split(' - ');
+        if (parts.length > 1 && parts[0].trim().length > 1) names.add(parts[0].trim());
+        // Also try without separator
+        var tparts = title.split('|');
+        if (tparts.length > 1 && tparts[0].trim().length > 1) names.add(tparts[0].trim());
     } catch(e) {}
 
-    // 5. Fallback: window globals (older ST)
+    // 8. window globals
     try {
         if (typeof window.name2 !== 'undefined' && window.name2) names.add(window.name2);
     } catch(e) {}
@@ -211,8 +246,19 @@ function getKnownCharacterNames() {
         }
     } catch(e) {}
 
+    // 9. localStorage: ST stores the active chat file name
+    try {
+        for (var k = 0; k < localStorage.length; k++) {
+            var key = localStorage.key(k);
+            if (key && key.indexOf('ST:') === 0 && key.indexOf('name2') !== -1) {
+                var val = localStorage.getItem(key);
+                if (val) { try { var v = JSON.parse(val); if(typeof v === 'string' && v.length > 1) names.add(v); } catch(e2) { if(val.length > 1) names.add(val); } }
+            }
+        }
+    } catch(e) {}
+
     var result = Array.from(names);
-    console.log('[Phone Extension] Found ' + result.length + ' character name(s) (API+DOM+title):', result);
+    console.log('[Phone Extension] Found ' + result.length + ' character name(s):', result);
     return result;
 }
 
