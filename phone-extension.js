@@ -103,12 +103,24 @@ function loadPhoneData() {
 function savePhoneData(shouldSave) {
     if (shouldSave === undefined) shouldSave = true;
     var m = typeof chat_metadata !== 'undefined' ? chat_metadata : (typeof window !== 'undefined' ? window.chat_metadata : null);
-    if (!m) return;
+    if (!m) {
+        // Fallback: persist to localStorage if ST metadata isn't available
+        try {
+            localStorage.setItem('_phone_data_fallback', JSON.stringify(phoneData));
+            console.log('[Phone Extension] Saved to localStorage fallback (ST metadata not ready)');
+        } catch(e) { console.warn('[Phone Extension] Fallback save failed:', e); }
+        return;
+    }
     if (!m[STORAGE_KEY]) m[STORAGE_KEY] = {};
     Object.assign(m[STORAGE_KEY], phoneData);
     if (shouldSave) {
-        if (typeof saveChatConditional === 'function') saveChatConditional(false);
-        if (typeof saveSettingsDebounced === 'function') saveSettingsDebounced();
+        // ST's settings/save systems can fail during init — guard against it
+        if (typeof saveChatConditional === 'function') { saveChatConditional(false); }
+        if (typeof saveSettingsDebounced === 'function') { saveSettingsDebounced(); }
+        // ALSO save to localStorage directly so API settings survive reloads
+        try {
+            localStorage.setItem('_phone_data_fallback', JSON.stringify(phoneData));
+        } catch(e) {}
     }
 }
 
@@ -1303,23 +1315,36 @@ function bindEvents() {
         console.log('[Phone Extension] Setting changed: ' + key + ' = ' + val);
         if(key === 'npcTextFrequency') startNpcAutoTextEngine();
     };})(selects[j]);}
-    // Settings text inputs (API config)
+    // Settings text inputs (API config) — use 'input' event for live updates
     var inputs = document.querySelectorAll('input.sett-input');
-    for(var k=0;k<inputs.length;k++){(function(el){el.onchange=function(){
+    var activeInput = document.activeElement ? document.activeElement.dataset && document.activeElement.dataset.set : null;
+    for(var k=0;k<inputs.length;k++){(function(el){el.oninput=function(){
         var key = el.dataset.set;
         phoneData.settings[key] = el.value;
-        savePhoneData();
-        
+
         // Save API settings globally so they persist across chats and restarts
         var apiFields = ['phoneApiUrl', 'phoneApiKey', 'phoneApiModel', 'phoneApiProvider'];
         if (apiFields.indexOf(key) > -1) {
             var global = loadGlobalSettings() || {};
             global[key] = el.value;
             saveGlobalSettings(global);
+            // Debounced save — only save after user pauses typing for 500ms
+            clearTimeout(el._saveTimeout);
+            el._saveTimeout = setTimeout(function() {
+                savePhoneData();
+            }, 500);
         }
-        
-        renderUI(); // Re-render to update status icon
     };})(inputs[k]);}
+    // Save on blur for inputs
+    for(var b=0;b<inputs.length;b++){(function(el){el.onblur=function(){
+        var key = el.dataset.set;
+        phoneData.settings[key] = el.value;
+        savePhoneData();
+        // Only re-render if we actually need to update the status icon
+        if (key === 'phoneApiKey' || key === 'phoneApiUrl') {
+            renderUI();
+        }
+    };})(inputs[b]);}
 
     // Compose area character counter
     var sci = document.getElementById('sci');
@@ -1417,22 +1442,67 @@ $(function(){
 
     injectPhone();
 
-    // Register event listeners once ST core is fully loaded
-    if (_windowEventSource && _windowEventTypes) {
-        _windowEventSource.on(_windowEventTypes.CHAT_CHANGED, function() {
-            savePhoneData(true);
-            phoneData = loadPhoneData();
-            activeApp = phoneData._activeApp || 'phone';
-            activeContactId = null;
-            activeSocialTab = 'feed';
-            renderUI();
-            scanChatForContacts();
-            startNpcAutoTextEngine();
-        });
-        _windowEventSource.on(_windowEventTypes.USER_MESSAGE_RENDERED, onUserMessage);
-        _windowEventSource.on(_windowEventTypes.CHARACTER_MESSAGE_RENDERED, onCharacterMessage);
-        console.log('[Phone Extension] Event listeners registered');
-    } else {
-        console.warn('[Phone Extension] eventSource not available — events will not fire');
+    // ST initializes eventSource AFTER dom-ready — retry with backoff
+    function registerEventListeners(attempt) {
+        if (attempt === undefined) attempt = 0;
+        var es = window.eventSource;
+        var et = typeof window.event_types !== 'undefined' ? window.event_types : null;
+
+        if (es && et) {
+            es.on(et.CHAT_CHANGED, function() {
+                savePhoneData(true);
+                phoneData = loadPhoneData();
+                activeApp = phoneData._activeApp || 'phone';
+                activeContactId = null;
+                activeSocialTab = 'feed';
+                renderUI();
+                scanChatForContacts();
+                startNpcAutoTextEngine();
+            });
+            es.on(et.USER_MESSAGE_RENDERED, onUserMessage);
+            es.on(et.CHARACTER_MESSAGE_RENDERED, onCharacterMessage);
+            console.log('[Phone Extension] Event listeners registered (attempt ' + (attempt+1) + ')');
+        } else if (attempt < 10) {
+            var delay = 500 * Math.pow(2, attempt);
+            console.log('[Phone Extension] eventSource not ready yet, retrying in ' + delay + 'ms (attempt ' + (attempt+1) + '/10)');
+            setTimeout(function() { registerEventListeners(attempt + 1); }, delay);
+        } else if (attempt === 10) {
+            // Last resort: also try to load fallback data
+            try {
+                var fb = localStorage.getItem('_phone_data_fallback');
+                if (fb) {
+                    var data = JSON.parse(fb);
+                    if (data && data.settings) {
+                        var apiFields = ['phoneApiUrl', 'phoneApiKey', 'phoneApiModel', 'phoneApiProvider'];
+                        for (var ai = 0; ai < apiFields.length; ai++) {
+                            if (data.settings[apiFields[ai]] !== undefined) {
+                                phoneData.settings[apiFields[ai]] = data.settings[apiFields[ai]];
+                            }
+                        }
+                        console.log('[Phone Extension] Loaded API settings from localStorage fallback');
+                    }
+                }
+            } catch(e) {}
+            console.warn('[Phone Extension] eventSource never became available after 10 attempts — polling fallback');
+            // Fallback: poll for settings changes periodically
+            setInterval(function() {
+                try {
+                    var fb = localStorage.getItem('_phone_data_fallback');
+                    if (fb) {
+                        var data = JSON.parse(fb);
+                        if (data && data.settings) {
+                            var apiFields = ['phoneApiUrl', 'phoneApiKey', 'phoneApiModel', 'phoneApiProvider'];
+                            for (var ai = 0; ai < apiFields.length; ai++) {
+                                if (data.settings[apiFields[ai]] !== undefined && data.settings[apiFields[ai]] !== phoneData.settings[apiFields[ai]]) {
+                                    phoneData.settings[apiFields[ai]] = data.settings[apiFields[ai]];
+                                }
+                            }
+                        }
+                    }
+                } catch(e) {}
+            }, 5000);
+        }
     }
+
+    registerEventListeners(0);
 });
