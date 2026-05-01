@@ -62,6 +62,124 @@ function getEmptyPhoneData() {
 }
 
 // ============================================================
+// CHAT DATABANK — DOM-powered message cache independent of ST globals
+// ============================================================
+// Console logs show: chat is an object, NOT an array, so Array.isArray(chat)
+// fails. This databank scrapes the DOM via MutationObserver and a periodic
+// poll so we always have fresh chat context regardless of ST internals.
+
+var ChatDatabank = {
+    messages: [],   // [{ speaker: string, text: string, timestamp: number }]
+    lastDomCount: 0,
+    _pollInterval: null,
+    _observer: null,
+
+    /**
+     * Scan #chat DOM for message blocks. Populates this.messages.
+     * Called on demand (fetchPageContent) and on a timer.
+     */
+    scrape: function() {
+        var domMsgs = [];
+        // Multiple selectors covering different ST versions/layouts
+        var selectors = [
+            '#chat .mes .mes_text',
+            '.mes .mes_text',
+            '#chat .mes .text',
+            '.chat .mes .mes_text'
+        ];
+        var msgEls = [];
+        for (var s = 0; s < selectors.length; s++) {
+            var found = document.querySelectorAll(selectors[s]);
+            if (found && found.length > 0) { msgEls = found; break; }
+        }
+        if (!msgEls.length) {
+            console.log('[Phone Extension] Databank: no message DOM elements found');
+            return;
+        }
+        // Take last N messages
+        var limit = Math.min(20, msgEls.length);
+        var start = msgEls.length - limit;
+        for (var i = start; i < msgEls.length; i++) {
+            var el = msgEls[i];
+            var text = (el.textContent || '').trim().substring(0, 250);
+            if (!text) continue;
+            // Try to extract speaker name
+            var speaker = 'Unknown';
+            // Author attribute
+            var authorAttr = el.closest('.mes').getAttribute('data-author')
+                || el.closest('.mes').getAttribute('data-character') 
+                || el.closest('.mes').getAttribute('ch_name');
+            if (authorAttr) {
+                speaker = authorAttr.trim();
+            } else {
+                // Try mes_name element
+                var nameEl = el.closest('.mes').querySelector('.mes_name, .char-name, .mes_header span:first-child');
+                if (nameEl) speaker = nameEl.textContent.trim();
+            }
+            domMsgs.push({
+                speaker: speaker,
+                text: text,
+                timestamp: Date.now()
+            });
+        }
+        this.messages = domMsgs;
+        this.lastDomCount = msgEls.length;
+        if (domMsgs.length > 0) {
+            console.log('[Phone Extension] Databank: scraped ' + domMsgs.length + ' messages (total DOM msgs: ' + this.lastDomCount + '), preview: ' + domMsgs[0].speaker + ': ' + domMsgs[0].text.substring(0, 80));
+        }
+    },
+
+    /**
+     * Get recent messages as a single string for LLM context.
+     */
+    getContextString: function(count) {
+        if (!count) count = 10;
+        if (this.messages.length === 0) this.scrape();
+        var recent = this.messages.slice(-count);
+        if (recent.length === 0) return '';
+        var parts = [];
+        for (var i = 0; i < recent.length; i++) {
+            parts.push(recent[i].speaker + ': ' + recent[i].text);
+        }
+        return parts.join('\n');
+    },
+
+    /**
+     * Start periodic polling and MutationObserver.
+     */
+    start: function() {
+        // Initial scrape
+        this.scrape();
+
+        // Poll every 5 seconds
+        if (this._pollInterval) clearInterval(this._pollInterval);
+        var self = this;
+        this._pollInterval = setInterval(function() { self.scrape(); }, 5000);
+
+        // MutationObserver for real-time updates
+        if (window.MutationObserver && !this._observer) {
+            var chatContainer = document.querySelector('#chat');
+            if (chatContainer) {
+                this._observer = new MutationObserver(function(mutations) {
+                    var changed = false;
+                    for (var m = 0; m < mutations.length; m++) {
+                        if (mutations[m].addedNodes.length > 0) { changed = true; break; }
+                    }
+                    if (changed) self.scrape();
+                });
+                this._observer.observe(chatContainer, { childList: true, subtree: true });
+                console.log('[Phone Extension] Databank: MutationObserver attached to #chat');
+            }
+        }
+    },
+
+    stop: function() {
+        if (this._pollInterval) { clearInterval(this._pollInterval); this._pollInterval = null; }
+        if (this._observer) { this._observer.disconnect(); this._observer = null; }
+    }
+};
+
+// ============================================================
 // PERSISTENCE
 // ============================================================
 function loadGlobalSettings() {
@@ -1116,47 +1234,46 @@ var BrowserApp = {
         var user = (typeof name1 !== 'undefined') ? name1 : 'You';
         var charName = (typeof name2 !== 'undefined') ? name2 : 'the character';
 
-        // Extract recent chat context from ST's chat array for roleplay relevance
+        // Extract recent chat context — primary source: ChatDatabank (DOM-scraped)
+        // fallback: ST's chat array (if actually an array)
         var chatContext = '';
-        console.log('[Phone Extension] Chat extraction debug — chat type:', typeof chat, '| isArray:', Array.isArray(chat), '| length:', (typeof chat !== 'undefined' && Array.isArray(chat) ? chat.length : 'n/a'), '| name2:', charName, '| name1:', user);
+
+        // PRIMARY: Use the databank (scrapes DOM messages live via MutationObserver)
         try {
-            if (typeof chat !== 'undefined' && Array.isArray(chat) && chat.length > 0) {
-                var recent = chat.slice(-10);
-                var messages = [];
-                for (var i = 0; i < recent.length; i++) {
-                    var m = recent[i];
-                    console.log('[Phone Extension] Message', i, '— name:', m.name, '| has mes:', !!m.mes);
-                    if (m.mes && m.mes.trim()) {
-                        var speaker = (m.name === user) ? user : charName;
-                        messages.push(speaker + ': ' + m.mes.substring(0, 150));
-                    }
+            var bank = ChatDatabank.getLastMessages(10);
+            if (bank.length > 0) {
+                var ctxParts = [];
+                for (var bi = 0; bi < bank.length; bi++) {
+                    ctxParts.push(bank[bi].speaker + ': ' + bank[bi].text.substring(0, 200));
                 }
-                console.log('[Phone Extension] Extracted', messages.length, 'messages from chat array');
-                if (messages.length > 0) {
-                    chatContext = messages.join('\n');
-                    console.log('[Phone Extension] Chat context preview:', chatContext.substring(0, 200));
-                }
+                chatContext = ctxParts.join('\n');
+                console.log('[Phone Extension] Chat context from databank (' + bank.length + ' messages):', chatContext.substring(0, 200));
             }
-        } catch(e) {
-            console.warn('[Phone Extension] Chat array extraction failed:', e.message);
-            // Fallback: try DOM extraction
+        } catch(e) { console.warn('[Phone Extension] Databank extraction failed:', e.message); }
+
+        // FALLBACK: Try ST's chat array if databank is empty
+        if (!chatContext) {
             try {
-                console.log('[Phone Extension] Attempting DOM extraction fallback');
-                var msgDivs = document.querySelectorAll('#chat .mes');
-                console.log('[Phone Extension] DOM found', msgDivs.length, 'message elements');
-                var domMsgs = [];
-                var domLimit = 10;
-                for (var di = Math.max(0, msgDivs.length - domLimit); di < msgDivs.length; di++) {
-                    var textEl = msgDivs[di].querySelector('.mes_text');
-                    if (textEl) {
-                        domMsgs.push(textEl.textContent.trim().substring(0, 150));
+                if (typeof chat !== 'undefined' && Array.isArray(chat) && chat.length > 0) {
+                    var recent = chat.slice(-10);
+                    var messages = [];
+                    for (var i = 0; i < recent.length; i++) {
+                        var m = recent[i];
+                        if (m.mes && m.mes.trim()) {
+                            var speaker = (m.is_user) ? user : charName;
+                            messages.push(speaker + ': ' + m.mes.substring(0, 150));
+                        }
+                    }
+                    if (messages.length > 0) {
+                        chatContext = messages.join('\n');
+                        console.log('[Phone Extension] Chat context from chat array:', chatContext.substring(0, 200));
                     }
                 }
-                if (domMsgs.length > 0) {
-                    chatContext = domMsgs.join('\n');
-                    console.log('[Phone Extension] DOM context preview:', chatContext.substring(0, 200));
-                }
-            } catch(e2) { console.warn('[Phone Extension] DOM fallback failed:', e2.message); }
+            } catch(e) { console.warn('[Phone Extension] Chat array fallback failed:', e.message); }
+        }
+
+        if (!chatContext) {
+            console.warn('[Phone Extension] No chat context available — databank empty and chat array unavailable');
         }
 
         // System prompt with anti-bleed + character isolation
