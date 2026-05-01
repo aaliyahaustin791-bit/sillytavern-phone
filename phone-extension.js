@@ -1118,25 +1118,32 @@ var BrowserApp = {
 
         // Extract recent chat context from ST's chat array for roleplay relevance
         var chatContext = '';
+        console.log('[Phone Extension] Chat extraction debug — chat type:', typeof chat, '| isArray:', Array.isArray(chat), '| length:', (typeof chat !== 'undefined' && Array.isArray(chat) ? chat.length : 'n/a'), '| name2:', charName, '| name1:', user);
         try {
             if (typeof chat !== 'undefined' && Array.isArray(chat) && chat.length > 0) {
                 var recent = chat.slice(-10);
                 var messages = [];
                 for (var i = 0; i < recent.length; i++) {
                     var m = recent[i];
+                    console.log('[Phone Extension] Message', i, '— name:', m.name, '| has mes:', !!m.mes);
                     if (m.mes && m.mes.trim()) {
                         var speaker = (m.name === user) ? user : charName;
                         messages.push(speaker + ': ' + m.mes.substring(0, 150));
                     }
                 }
+                console.log('[Phone Extension] Extracted', messages.length, 'messages from chat array');
                 if (messages.length > 0) {
                     chatContext = messages.join('\n');
+                    console.log('[Phone Extension] Chat context preview:', chatContext.substring(0, 200));
                 }
             }
         } catch(e) {
+            console.warn('[Phone Extension] Chat array extraction failed:', e.message);
             // Fallback: try DOM extraction
             try {
+                console.log('[Phone Extension] Attempting DOM extraction fallback');
                 var msgDivs = document.querySelectorAll('#chat .mes');
+                console.log('[Phone Extension] DOM found', msgDivs.length, 'message elements');
                 var domMsgs = [];
                 var domLimit = 10;
                 for (var di = Math.max(0, msgDivs.length - domLimit); di < msgDivs.length; di++) {
@@ -1145,8 +1152,11 @@ var BrowserApp = {
                         domMsgs.push(textEl.textContent.trim().substring(0, 150));
                     }
                 }
-                if (domMsgs.length > 0) chatContext = domMsgs.join('\n');
-            } catch(e2) { /* silent */ }
+                if (domMsgs.length > 0) {
+                    chatContext = domMsgs.join('\n');
+                    console.log('[Phone Extension] DOM context preview:', chatContext.substring(0, 200));
+                }
+            } catch(e2) { console.warn('[Phone Extension] DOM fallback failed:', e2.message); }
         }
 
         // System prompt with anti-bleed + character isolation
@@ -1216,7 +1226,7 @@ var BrowserApp = {
                         { role: 'system', content: systemPrompt },
                         { role: 'user', content: userPrompt }
                     ],
-                    max_tokens: 1200,
+                    max_tokens: 2000,
                     temperature: 0.9
                 }));
             });
