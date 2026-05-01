@@ -1141,37 +1141,91 @@ var BrowserApp = {
         var apiKey = s.phoneApiKey || '';
         var useDedicated = !!(apiBase && apiKey && apiModel);
 
-        var genUrl = useDedicated ? apiBase + '/chat/completions' : '/api/chat/completions';
-        var headers = { 'Content-Type': 'application/json' };
-        if (useDedicated && apiKey) headers['Authorization'] = 'Bearer ' + apiKey;
+        // Require dedicated API — never fall back to ST proxy (which injects character cards/world info)
+        if (!useDedicated) {
+            tab.html = '<div class="wpage"><div class="whead"><h3>' + this._esc(query) + '</h3></div>' +
+                '<div class="warticle"><p>Configure your API key and URL in Settings first.</p></div></div>';
+            savePhoneData();
+            if(phoneData.browser.activeTabId === tabId) renderUI();
+            return;
+        }
 
+        var genUrl = apiBase + '/chat/completions';
         var payload = {
+            model: apiModel,
             messages: [
                 { role: 'system', content: systemPrompt },
                 { role: 'user', content: userPrompt }
             ],
             max_tokens: 1200,
-            temperature: 0.9,
-            tool_choice: 'none' // Disable all tool use — prevents WebSearch and other ST tools
+            temperature: 0.9
         };
-        if (useDedicated) payload.model = apiModel;
-        
-        try {
-            var res = await fetch(genUrl, { method: 'POST', headers: headers, body: JSON.stringify(payload) });
-            var data = await res.json();
-            if (data && data.choices && data.choices[0] && data.choices[0].message) {
-                var html = data.choices[0].message.content;
-                // Strip markdown fences if present
-                html = html.replace(/^```html\n?/, '').replace(/\n```$/, '');
-                tab.html = html;
-                tab.title = query.charAt(0).toUpperCase() + query.slice(1);
-                savePhoneData();
-                // Refresh UI only if this tab is still active
-                if(phoneData.browser.activeTabId === tabId) renderUI();
-                console.log('[Phone Extension] Browser page generated: ' + query);
+
+        // Use XMLHttpRequest to bypass ST's fetch interceptor which blocks external APIs
+        var self = this;
+        var xhr = new XMLHttpRequest();
+        xhr.open('POST', genUrl, true);
+        xhr.setRequestHeader('Content-Type', 'application/json');
+        xhr.setRequestHeader('Authorization', 'Bearer ' + apiKey);
+        xhr.timeout = 30000;
+        xhr.onload = function() {
+            if (xhr.status >= 200 && xhr.status < 300) {
+                var data = JSON.parse(xhr.responseText);
+                if (data && data.choices && data.choices[0] && data.choices[0].message) {
+                    var html = data.choices[0].message.content;
+                    // Strip markdown fences if present
+                    html = html.replace(/^```html\n?/, '').replace(/\n```$/, '');
+                    tab.html = html;
+                    tab.title = query.charAt(0).toUpperCase() + query.slice(1);
+                    savePhoneData();
+                    if(phoneData.browser.activeTabId === tabId) renderUI();
+                    console.log('[Phone Extension] Browser page generated: ' + query);
+                } else {
+                    throw new Error('Empty response');
+                }
             } else {
-                throw new Error('Empty response');
+                throw new Error('HTTP ' + xhr.status);
             }
+        };
+        xhr.onerror = function() { throw new Error('Network error'); };
+        xhr.ontimeout = function() { throw new Error('Request timed out'); };
+        xhr.send(JSON.stringify(payload));
+
+        try {
+            // Since XMLHttpRequest is not async, use a wrapper to catch errors
+            var errorHandler = function(msg) {
+                console.warn('[Phone Extension] Browser page generation failed:', msg);
+                var fb = '<div class="wpage">' +
+                    '<div class="whead"><h3>' + self._esc(query) + '</h3></div>' +
+                    (isSearch ?
+                        '<div class="warticle"><p>No results found for <b>' + self._esc(query) + '</b>. Try a different search.</p></div>' :
+                        '<div class="warticle"><p>Unable to load content. Check your API settings.</p></div>'
+                    ) + '</div>';
+                tab.html = fb;
+                savePhoneData();
+                if(phoneData.browser.activeTabId === tabId) renderUI();
+            };
+            // Attach error handler to xhr
+            xhr.onerror = function() { errorHandler('Network error'); };
+            xhr.ontimeout = function() { errorHandler('Request timed out'); };
+            xhr.onload = function() {
+                if (xhr.status < 200 || xhr.status >= 300) {
+                    errorHandler('HTTP ' + xhr.status);
+                    return;
+                }
+                var data = JSON.parse(xhr.responseText);
+                if (data && data.choices && data.choices[0] && data.choices[0].message) {
+                    var html = data.choices[0].message.content;
+                    html = html.replace(/^```html\n?/, '').replace(/\n```$/, '');
+                    tab.html = html;
+                    tab.title = query.charAt(0).toUpperCase() + query.slice(1);
+                    savePhoneData();
+                    if(phoneData.browser.activeTabId === tabId) renderUI();
+                    console.log('[Phone Extension] Browser page generated: ' + query);
+                } else {
+                    errorHandler('Empty response');
+                }
+            };
         } catch (e) {
             console.warn('[Phone Extension] Browser page generation failed:', e.message);
             var fallback = '<div class="wpage">' +
@@ -1287,26 +1341,38 @@ var SettingsApp = {
         var btn = document.querySelector('[data-test-api]');
         if (btn) btn.textContent = 'Testing...';
         console.log('[Phone Extension] Testing API at ' + url + ' with model ' + s.phoneApiModel);
-        fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + s.phoneApiKey },
-            body: JSON.stringify({
-                model: s.phoneApiModel || 'gpt-4o-mini',
-                messages: [{ role: 'user', content: 'Reply with OK' }],
-                max_tokens: 5
-            })
-        }).then(function(res) {
-            if (!res.ok) throw new Error('HTTP ' + res.status);
-            return res.json();
-        }).then(function(data) {
-            console.log('[Phone Extension] API test OK:', data);
-            if (typeof toastr !== 'undefined') toastr.success('API test successful!');
-        }).catch(function(err) {
-            console.warn('[Phone Extension] API test failed:', err.message);
-            if (typeof toastr !== 'undefined') toastr.error('API test failed: ' + err.message);
-        }).finally(function() {
+        // Use XMLHttpRequest to bypass ST's fetch interceptor which blocks external APIs
+        var xhr = new XMLHttpRequest();
+        xhr.open('POST', url, true);
+        xhr.setRequestHeader('Content-Type', 'application/json');
+        xhr.setRequestHeader('Authorization', 'Bearer ' + s.phoneApiKey);
+        xhr.timeout = 15000;
+        xhr.onload = function() {
+            if (xhr.status >= 200 && xhr.status < 300) {
+                var data = JSON.parse(xhr.responseText);
+                console.log('[Phone Extension] API test OK:', data);
+                if (typeof toastr !== 'undefined') toastr.success('API test successful!');
+            } else {
+                console.warn('[Phone Extension] API test failed: HTTP ' + xhr.status);
+                if (typeof toastr !== 'undefined') toastr.error('API test failed: HTTP ' + xhr.status);
+            }
             renderUI();
-        });
+        };
+        xhr.ontimeout = function() {
+            console.warn('[Phone Extension] API test timed out');
+            if (typeof toastr !== 'undefined') toastr.error('API test timed out');
+            renderUI();
+        };
+        xhr.onerror = function() {
+            console.warn('[Phone Extension] API test failed: network error');
+            if (typeof toastr !== 'undefined') toastr.error('API test failed: network error');
+            renderUI();
+        };
+        xhr.send(JSON.stringify({
+            model: s.phoneApiModel || 'gpt-4o-mini',
+            messages: [{ role: 'user', content: 'Reply with OK' }],
+            max_tokens: 5
+        }));
     }
 };
 
