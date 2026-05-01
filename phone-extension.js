@@ -556,17 +556,27 @@ function _getSafeChatTextBatch(count) {
             msgs = SillyTavern.getChatMessages();
         } else if (typeof chat_metadata !== 'undefined' && chat_metadata && chat_metadata.chat && Array.isArray(chat_metadata.chat)) {
             msgs = chat_metadata.chat;
-        } else {
-            console.warn('[Phone Extension] No chat message API available');
+        }
+        
+        if (msgs && msgs.length) {
+            var start = Math.max(0, msgs.length - count);
+            for (var i = start; i < msgs.length; i++) {
+                if (msgs[i] && msgs[i].mes) {
+                    result.push(msgs[i].mes);
+                }
+            }
             return result;
         }
         
-        if (!msgs || !msgs.length) return result;
-        
-        var start = Math.max(0, msgs.length - count);
-        for (var i = start; i < msgs.length; i++) {
-            if (msgs[i] && msgs[i].mes) {
-                result.push(msgs[i].mes);
+        // Fallback: scrape from DOM
+        console.log('[Phone Extension] Falling back to DOM scraping for chat messages');
+        var messageElements = document.querySelectorAll('#chat .mes .mes_text, .mes .mes_text, #chat .mes .text, .mes .text');
+        var limit = Math.min(count, messageElements.length);
+        var startIdx = messageElements.length - limit;
+        for (var i = startIdx; i < messageElements.length; i++) {
+            var text = messageElements[i].textContent.trim();
+            if (text) {
+                result.push(text);
             }
         }
     } catch(e) {
