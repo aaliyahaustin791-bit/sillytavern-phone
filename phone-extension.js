@@ -14,6 +14,7 @@
 // STATE & SETTINGS
 // ============================================================
 var STORAGE_KEY = 'phone_extension';
+var GLOBAL_STORAGE_KEY = 'phone_extension_global';
 var phoneData = getEmptyPhoneData();
 var activeApp = 'phone';
 var activeContactId = null;
@@ -69,18 +70,53 @@ function loadPhoneData() {
     var k;
     for (k in e) { if (m[STORAGE_KEY][k] === undefined) m[STORAGE_KEY][k] = e[k]; }
     if (!m[STORAGE_KEY].settings) m[STORAGE_KEY].settings = getDefaultPhoneSettings();
+    
+    // Override/Merge with global API settings
+    var global = loadGlobalSettings();
+    if (global) {
+        var apiFields = ['phoneApiUrl', 'phoneApiKey', 'phoneApiModel', 'phoneApiProvider'];
+        for (var f = 0; f < apiFields.length; f++) {
+            var field = apiFields[f];
+            if (global[field] !== undefined) m[STORAGE_KEY].settings[field] = global[field];
+        }
+    }
     return m[STORAGE_KEY];
+}
+
+function loadGlobalSettings() {
+    try {
+        var global = localStorage.getItem(GLOBAL_STORAGE_KEY);
+        return global ? JSON.parse(global) : null;
+    } catch(e) { return null; }
+}
+
+function saveGlobalSettings(settings) {
+    try {
+        localStorage.setItem(GLOBAL_STORAGE_KEY, JSON.stringify(settings));
+    } catch(e) { console.warn('[Phone Extension] Failed to save global settings:', e); }
 }
 
 function savePhoneData(shouldSave) {
     if (shouldSave === undefined) shouldSave = true;
     var m = typeof chat_metadata !== 'undefined' ? chat_metadata : (typeof window !== 'undefined' ? window.chat_metadata : null);
-    if (!m) return;
+    if (!m) {
+        // Fallback: persist to localStorage if ST metadata isn't available
+        try {
+            localStorage.setItem('_phone_data_fallback', JSON.stringify(phoneData));
+            console.log('[Phone Extension] Saved to localStorage fallback (ST metadata not ready)');
+        } catch(e) { console.warn('[Phone Extension] Fallback save failed:', e); }
+        return;
+    }
     if (!m[STORAGE_KEY]) m[STORAGE_KEY] = {};
     Object.assign(m[STORAGE_KEY], phoneData);
     if (shouldSave) {
-        if (typeof saveChatConditional === 'function') saveChatConditional(false);
-        if (typeof saveSettingsDebounced === 'function') saveSettingsDebounced();
+        // ST's settings/save systems can fail during init — guard against it
+        if (typeof saveChatConditional === 'function') { saveChatConditional(false); }
+        if (typeof saveSettingsDebounced === 'function') { saveSettingsDebounced(); }
+        // ALSO save to localStorage directly so API settings survive reloads
+        try {
+            localStorage.setItem('_phone_data_fallback', JSON.stringify(phoneData));
+        } catch(e) { /* silent */ }
     }
 }
 
@@ -1476,11 +1512,19 @@ function bindEvents() {
     for(var k=0;k<inputs.length;k++){(function(el){el.oninput=function(){
         var key = el.dataset.set;
         phoneData.settings[key] = el.value;
-        // Debounced save — only save after user pauses typing for 500ms
-        clearTimeout(el._saveTimeout);
-        el._saveTimeout = setTimeout(function() {
-            savePhoneData();
-        }, 500);
+        
+        // Save API settings globally so they persist across chats and restarts
+        var apiFields = ['phoneApiUrl', 'phoneApiKey', 'phoneApiModel', 'phoneApiProvider'];
+        if (apiFields.indexOf(key) > -1) {
+            var global = loadGlobalSettings() || {};
+            global[key] = el.value;
+            saveGlobalSettings(global);
+            // Debounced save — only save after user pauses typing for 500ms
+            clearTimeout(el._saveTimeout);
+            el._saveTimeout = setTimeout(function() {
+                savePhoneData();
+            }, 500);
+        }
     };})(inputs[k]);}
 
     // Compose area character counter
