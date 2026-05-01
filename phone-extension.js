@@ -480,7 +480,16 @@ function getKnownCharacterNames() {
  */
 function scanChatForContacts() {
     var knownNames = getKnownCharacterNames();
+    
+    // Debug logging
     console.log('[Phone Extension] scanChatForContacts: knownNames=', knownNames);
+    
+    // If no known names, the characters array might not be loaded yet — try again in 2s
+    if (!knownNames.length) {
+        console.log('[Phone Extension] No known character names yet, retrying in 2s...');
+        setTimeout(scanChatForContacts, 2000);
+        return;
+    }
     
     // Always ensure the current character is added as a contact
     var currentCharName = null;
@@ -1619,7 +1628,10 @@ function injectPhone() {
     setTimeout(function(){
         phoneData=loadPhoneData();
         activeApp=phoneData._activeApp||'phone';
-        autoDetectContact();
+        // Defer contact scanning to allow character data to load
+        setTimeout(function() {
+            autoDetectContact();
+        }, 1000);
         renderUI();
         startNpcAutoTextEngine();
     },300);
