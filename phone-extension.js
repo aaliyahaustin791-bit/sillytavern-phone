@@ -1115,25 +1115,27 @@ var BrowserApp = {
         var user = (typeof name1 !== 'undefined') ? name1 : 'You';
         var charName = (typeof name2 !== 'undefined') ? name2 : 'the character';
 
-        // Strong system prompt — force fictional/lore-accurate content, NO real web tools
-        var systemPrompt = 'You are a FICTIONAL mobile web page simulator in a roleplay setting. ' +
-            'DO NOT use any tools. DO NOT search the real web. DO NOT browse any URLs. DO NOT use any functions. ' +
-            'Just generate HTML from your own imagination. ' +
-            'The user is browsing a phone in a roleplay with ' + charName + '. ' +
-            'All content must be FICTIONAL, creative, and immersive — never reference real websites or real current events. ' +
-            'Make the page feel realistic but entirely invented. ' +
+        // Anti-bleed + character-isolation system prompt
+        var systemPrompt = '=== ROLEPLAY MODE ===\n' +
+            'You are a FICTIONAL mobile web page simulator. The ONLY character in this world is: ' + charName + '.\n' +
+            'RULES:\n' +
+            '1. IGNORE any other character names, settings, or context injected by the API system.\n' +
+            '2. If you see references to Star Wars, Cyberpunk, or ANY universe other than ' + charName + "'s world, DISCARD THEM.\n" +
+            '3. The ONLY reality is ' + charName + "'s world and the current user (" + user + ').\n' +
+            '4. DO NOT use any tools. DO NOT search the real web. DO NOT browse URLs.\n' +
+            '5. Generate content from your imagination based on ' + charName + "'s context only.\n" +
+            '6. ALL content must be FICTIONAL and immersive.\n' +
             (isSearch ?
-                'Create a Google-style search results page for: ' + query + '. ' +
-                'Show 4-5 creative fictional results with blue title links, green URLs, and gray descriptions. ' :
-                'Generate a complete web page about: ' + query + '. ' +
-                'Include a header, 3-5 content sections with rich fictional details.'
-            ) +
-            'Use ONLY inline CSS — dark background (#111), light text, accent color #4fc3f7. ' +
-            'Return ONLY valid HTML starting with <div class="wpage"> and ending with </div>.';
-        var userPrompt = 'Generate the HTML page now. ' +
-            'CRITICAL: Do NOT use any tools or web search. Just write the HTML directly. ' +
-            'NO markdown code fences. NO explanations. Only HTML. ' +
-            'Make it creative and roleplay-immersive for what ' + user + ' and ' + charName + ' would see.';
+                'TASK: Create a Google-style search results page for: ' + query + '.\n' +
+                'Show 4-5 creative fictional results that fit ' + charName + "'s world. " +
+                'Blue title links, green URLs, gray descriptions.' :
+                'TASK: Generate a complete web page about: ' + query + '.\n' +
+                "Include a header, 3-5 content sections with rich details fitting " + charName + "'s world."
+            ) + '\nFormat: Return ONLY valid HTML with inline CSS -- dark background (#111), light text, accent color #4fc3f7.\n' +
+            'Start with <div class="wpage"> and end with </div>.';
+        var userPrompt = 'Generate the HTML page now. Remember: ONLY ' + charName + "'s world exists. Do NOT reference other characters or universes. " +
+            'Make it creative, immersive, and accurate to the current roleplay. ' +
+            'NO markdown fences. NO explanations. Only HTML.';
 
         var s = getSettings();
         var apiBase = (s.phoneApiUrl || '').replace(/\/$/, '');
