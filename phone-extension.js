@@ -548,7 +548,19 @@ function getKnownCharacterNames() {
 function _getSafeChatTextBatch(count) {
     var result = [];
     try {
-        var msgs = getChatMessagesSafe();
+        // Try to use SillyTavern's getChatMessagesSafe if available
+        var msgs = null;
+        if (typeof getChatMessagesSafe === 'function') {
+            msgs = getChatMessagesSafe();
+        } else if (typeof SillyTavern !== 'undefined' && SillyTavern.getChatMessages) {
+            msgs = SillyTavern.getChatMessages();
+        } else if (typeof chat_metadata !== 'undefined' && chat_metadata && chat_metadata.chat && Array.isArray(chat_metadata.chat)) {
+            msgs = chat_metadata.chat;
+        } else {
+            console.warn('[Phone Extension] No chat message API available');
+            return result;
+        }
+        
         if (!msgs || !msgs.length) return result;
         
         var start = Math.max(0, msgs.length - count);
