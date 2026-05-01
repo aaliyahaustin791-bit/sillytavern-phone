@@ -457,38 +457,81 @@ function injectMessageToStory(text, direction, contactName) {
 
 /*
  * Builds a list of known SillyTavern character names to match against.
- * Uses `characters` array if available, falls back to `name2`.
+ * Uses SillyTavern.getContext() to access the characters map.
  */
 function getKnownCharacterNames() {
     var names = new Set();
     
     // Debug: log what's available
-    console.log('[Phone Extension] getKnownCharacterNames: checking for characters array and name2');
-    console.log('[Phone Extension] typeof characters:', typeof characters, Array.isArray(characters));
-    console.log('[Phone Extension] name2:', typeof name2, name2);
+    console.log('[Phone Extension] getKnownCharacterNames: checking for characters via SillyTavern.getContext()');
     
-    if (typeof characters !== 'undefined' && Array.isArray(characters)) {
-        console.log('[Phone Extension] characters array length:', characters.length);
-        for (var i = 0; i < characters.length; i++) {
-            if (characters[i] && characters[i].name) {
-                names.add(characters[i].name);
-                if (names.size <= 5) {
-                    console.log('[Phone Extension] Added character from array:', characters[i].name);
+    // Try to get context via SillyTavern.getContext()
+    var context = null;
+    if (typeof SillyTavern !== 'undefined' && typeof SillyTavern.getContext === 'function') {
+        context = SillyTavern.getContext();
+        console.log('[Phone Extension] Got context via SillyTavern.getContext()');
+    } else {
+        console.log('[Phone Extension] SillyTavern.getContext not available, trying window context');
+        context = typeof chat_metadata !== 'undefined' ? chat_metadata : (typeof window !== 'undefined' ? window.chat_metadata : null);
+    }
+    
+    if (!context) {
+        console.log('[Phone Extension] No context available');
+        // Fallback to legacy globals
+        if (typeof characters !== 'undefined' && Array.isArray(characters)) {
+            for (var i = 0; i < characters.length; i++) {
+                if (characters[i] && characters[i].name) {
+                    names.add(characters[i].name);
+                }
+            }
+        }
+        if (typeof name2 !== 'undefined' && name2) {
+            names.add(name2);
+        }
+        return Array.from(names);
+    }
+    
+    // Get characters from context.characters (map/object) or context.charactersArray
+    var chars = context.characters;
+    if (chars) {
+        console.log('[Phone Extension] context.characters type:', typeof chars, Array.isArray(chars) ? 'ARRAY length=' + chars.length : 'OBJECT keys=' + Object.keys(chars).length);
+        
+        if (Array.isArray(chars)) {
+            // It's an array
+            for (var i = 0; i < chars.length; i++) {
+                if (chars[i] && chars[i].name) {
+                    names.add(chars[i].name);
+                }
+            }
+        } else if (typeof chars === 'object') {
+            // It's a map/object (keyed by characterId)
+            var charIds = Object.keys(chars);
+            console.log('[Phone Extension] Character IDs:', charIds.slice(0, 5));
+            for (var i = 0; i < charIds.length; i++) {
+                var char = chars[charIds[i]];
+                if (char && char.name) {
+                    names.add(char.name);
+                    if (i < 5) console.log('[Phone Extension] Added character:', char.name);
                 }
             }
         }
     } else {
-        console.log('[Phone Extension] characters array not available or not an array');
+        console.log('[Phone Extension] context.characters is null/undefined');
     }
     
+    // Also add current character via context.characterId
+    if (context.characterId && chars && chars[context.characterId] && chars[context.characterId].name) {
+        names.add(chars[context.characterId].name);
+        console.log('[Phone Extension] Added current character via context.characterId:', chars[context.characterId].name);
+    }
+    
+    // Fallback: check name2 (current character name)
     if (typeof name2 !== 'undefined' && name2) {
         names.add(name2);
         console.log('[Phone Extension] Added name2:', name2);
-    } else {
-        console.log('[Phone Extension] name2 is undefined or empty');
     }
     
-    // Also try to get from DOM as a last resort
+    // Last resort: DOM
     var charNameEl = document.querySelector('#character_name_animation, #character_name, .char-name-element');
     if (charNameEl && charNameEl.textContent.trim() && !names.has(charNameEl.textContent.trim())) {
         names.add(charNameEl.textContent.trim());
