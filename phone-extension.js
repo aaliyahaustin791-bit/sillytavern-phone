@@ -79,7 +79,17 @@ function saveGlobalSettings(settings) {
 
 function loadPhoneData() {
     var m = typeof chat_metadata !== 'undefined' ? chat_metadata : (typeof window !== 'undefined' ? window.chat_metadata : null);
-    if (!m) return getEmptyPhoneData();
+    if (!m) {
+        // Fallback: restore from localStorage if ST metadata isn't available yet
+        try {
+            var fallback = localStorage.getItem('_phone_data_fallback');
+            if (fallback) {
+                console.log('[Phone Extension] Restored from localStorage fallback');
+                return JSON.parse(fallback);
+            }
+        } catch(e) {}
+        return getEmptyPhoneData();
+    }
     if (!m[STORAGE_KEY]) m[STORAGE_KEY] = getEmptyPhoneData();
     
     var data = m[STORAGE_KEY];
