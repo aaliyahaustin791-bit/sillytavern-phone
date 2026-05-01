@@ -65,22 +65,53 @@ function getEmptyPhoneData() {
 // ============================================================
 function loadPhoneData() {
     var m = typeof chat_metadata !== 'undefined' ? chat_metadata : (typeof window !== 'undefined' ? window.chat_metadata : null);
-    if (!m || !m[STORAGE_KEY]) return getEmptyPhoneData();
-    var e = getEmptyPhoneData();
-    var k;
-    for (k in e) { if (m[STORAGE_KEY][k] === undefined) m[STORAGE_KEY][k] = e[k]; }
-    if (!m[STORAGE_KEY].settings) m[STORAGE_KEY].settings = getDefaultPhoneSettings();
     
-    // Override/Merge with global API settings
-    var global = loadGlobalSettings();
-    if (global) {
-        var apiFields = ['phoneApiUrl', 'phoneApiKey', 'phoneApiModel', 'phoneApiProvider'];
-        for (var f = 0; f < apiFields.length; f++) {
-            var field = apiFields[f];
-            if (global[field] !== undefined) m[STORAGE_KEY].settings[field] = global[field];
+    // Try to load from ST metadata first
+    if (m && m[STORAGE_KEY]) {
+        var e = getEmptyPhoneData();
+        var k;
+        for (k in e) { if (m[STORAGE_KEY][k] === undefined) m[STORAGE_KEY][k] = e[k]; }
+        if (!m[STORAGE_KEY].settings) m[STORAGE_KEY].settings = getDefaultPhoneSettings();
+        
+        // Override/Merge with global API settings
+        var global = loadGlobalSettings();
+        if (global) {
+            var apiFields = ['phoneApiUrl', 'phoneApiKey', 'phoneApiModel', 'phoneApiProvider'];
+            for (var f = 0; f < apiFields.length; f++) {
+                var field = apiFields[f];
+                if (global[field] !== undefined) m[STORAGE_KEY].settings[field] = global[field];
+            }
         }
+        return m[STORAGE_KEY];
     }
-    return m[STORAGE_KEY];
+    
+    // Fallback: try to load from localStorage
+    try {
+        var fallback = localStorage.getItem('_phone_data_fallback');
+        if (fallback) {
+            var parsed = JSON.parse(fallback);
+            console.log('[Phone Extension] Loaded from localStorage fallback');
+            // Merge with defaults
+            var e = getEmptyPhoneData();
+            for (var k in e) { if (parsed[k] === undefined) parsed[k] = e[k]; }
+            if (!parsed.settings) parsed.settings = getDefaultPhoneSettings();
+            
+            // Also merge with global API settings
+            var global = loadGlobalSettings();
+            if (global) {
+                var apiFields = ['phoneApiUrl', 'phoneApiKey', 'phoneApiModel', 'phoneApiProvider'];
+                for (var f = 0; f < apiFields.length; f++) {
+                    var field = apiFields[f];
+                    if (global[field] !== undefined) parsed.settings[field] = global[field];
+                }
+            }
+            return parsed;
+        }
+    } catch(e) {
+        console.warn('[Phone Extension] Failed to load fallback data:', e);
+    }
+    
+    return getEmptyPhoneData();
 }
 
 function loadGlobalSettings() {
@@ -449,6 +480,21 @@ function getKnownCharacterNames() {
  */
 function scanChatForContacts() {
     var knownNames = getKnownCharacterNames();
+    
+    // Always ensure the current character is added as a contact
+    var currentCharName = null;
+    if (typeof name2 !== 'undefined' && name2) {
+        currentCharName = name2;
+    } else {
+        var charHeader = document.querySelector('#character_name_animation, #character_name, .char-name-element');
+        if (charHeader && charHeader.textContent.trim()) {
+            currentCharName = charHeader.textContent.trim();
+        }
+    }
+    if (currentCharName) {
+        addOrUpdateContact(currentCharName, true);
+    }
+    
     if (!knownNames.length) return;
 
     var chatHist = _getSafeChatTextBatch(50);
@@ -471,13 +517,7 @@ function scanChatForContacts() {
     }
     chatHist = deduped;
     if (!chatHist.length) {
-        console.log('[Phone Extension] Contact scan: no chat text available from DOM or ST globals, trying header');
-        var charHeader = document.querySelector('#character_name_animation, #character_name, .char-name-element');
-        if (charHeader && charHeader.textContent.trim()) {
-            addOrUpdateContact(charHeader.textContent.trim(), true);
-        } else if (typeof name2 !== 'undefined') {
-            addOrUpdateContact(name2, true);
-        }
+        console.log('[Phone Extension] Contact scan: no chat text available');
         return;
     }
 
