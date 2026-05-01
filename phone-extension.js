@@ -542,6 +542,28 @@ function getKnownCharacterNames() {
 }
 
 /*
+ * Gets a batch of recent chat message texts for scanning.
+ * Returns an array of message text strings.
+ */
+function _getSafeChatTextBatch(count) {
+    var result = [];
+    try {
+        var msgs = getChatMessagesSafe();
+        if (!msgs || !msgs.length) return result;
+        
+        var start = Math.max(0, msgs.length - count);
+        for (var i = start; i < msgs.length; i++) {
+            if (msgs[i] && msgs[i].mes) {
+                result.push(msgs[i].mes);
+            }
+        }
+    } catch(e) {
+        console.warn('[Phone Extension] _getSafeChatTextBatch error:', e);
+    }
+    return result;
+}
+
+/*
  * Scans the last N chat messages for character names (both spoken and mentioned).
  * Adds any new characters found as phone contacts.
  */
