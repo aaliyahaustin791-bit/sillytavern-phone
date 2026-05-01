@@ -480,6 +480,7 @@ function getKnownCharacterNames() {
  */
 function scanChatForContacts() {
     var knownNames = getKnownCharacterNames();
+    console.log('[Phone Extension] scanChatForContacts: knownNames=', knownNames);
     
     // Always ensure the current character is added as a contact
     var currentCharName = null;
@@ -491,8 +492,10 @@ function scanChatForContacts() {
             currentCharName = charHeader.textContent.trim();
         }
     }
+    console.log('[Phone Extension] Current character:', currentCharName);
     if (currentCharName) {
-        addOrUpdateContact(currentCharName, true);
+        var added = addOrUpdateContact(currentCharName, true);
+        console.log('[Phone Extension] Added/updated current character contact:', currentCharName, 'new=', added);
     }
     
     if (!knownNames.length) return;
@@ -1488,6 +1491,19 @@ function _phoneClickHandler(e) {
             return;
         }
         if (t.id==='csb') { SocialApp.submitPost(); return; }
+        // Phone section tabs (Dialer/Recent/Contacts)
+        if (t.dataset.section && t.closest('[data-app="call"]')) {
+            var section = t.dataset.section;
+            var sections = document.querySelectorAll('[data-app="call"] .pss');
+            var tabs = document.querySelectorAll('[data-app="call"] .pt');
+            sections.forEach(function(s) { s.classList.remove('active'); });
+            tabs.forEach(function(tb) { tb.classList.remove('active'); });
+            var targetSection = document.querySelector('[data-app="call"] .pss[data-section="' + section + '"]');
+            var targetTab = document.querySelector('[data-app="call"] .pt[data-section="' + section + '"]');
+            if (targetSection) targetSection.classList.add('active');
+            if (targetTab) targetTab.classList.add('active');
+            return;
+        }
         // Browser
         if (t.dataset.newTab) { BrowserApp.openNewTab(); return; }
         if (t.dataset.tid) { phoneData.browser.activeTabId=t.dataset.tid; savePhoneData(); renderUI(); return; }
