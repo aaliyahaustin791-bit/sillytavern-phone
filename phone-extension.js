@@ -1114,35 +1114,45 @@ var BrowserApp = {
         var pageType = isSearch ? 'search' : 'page';
         var user = (typeof name1 !== 'undefined') ? name1 : 'You';
         var charName = (typeof name2 !== 'undefined') ? name2 : 'the character';
-        
-        var systemPrompt = 'You are a mobile web page simulator. Generate a complete, self-contained mobile-friendly web page in HTML for the query: ' + query + '. ' +
-            'The page should look like a real mobile website with a dark theme. ' +
-            (isSearch ? 'Create a Google-style search results page with 4-5 results, each with a blue title, green URL, and gray snippet. ' : '') +
-            'Use inline CSS. Dark background (#111), white/light text. Include a header with the title.';
-        var userPrompt = 'Generate a rich, realistic HTML page for: ' + query + '. ' +
-            (isSearch ? 'Make it look like a search engine results page. ' : '') +
-            'Context: The user (' + user + ') is chatting with ' + charName + ' in a roleplay. ' +
-            'Keep the content relevant if possible, but always feel realistic. ' +
-            'IMPORTANT: Return ONLY the HTML content, NO markdown code blocks, NO explanation. ' +
-            'Start with <div class="wpage"> and end with </div>.';
-        
+
+        // Strong system prompt — force fictional/lore-accurate content, NO real web tools
+        var systemPrompt = 'You are a FICTIONAL mobile web page simulator in a roleplay setting. ' +
+            'DO NOT use any tools. DO NOT search the real web. DO NOT browse any URLs. DO NOT use any functions. ' +
+            'Just generate HTML from your own imagination. ' +
+            'The user is browsing a phone in a roleplay with ' + charName + '. ' +
+            'All content must be FICTIONAL, creative, and immersive — never reference real websites or real current events. ' +
+            'Make the page feel realistic but entirely invented. ' +
+            (isSearch ?
+                'Create a Google-style search results page for: ' + query + '. ' +
+                'Show 4-5 creative fictional results with blue title links, green URLs, and gray descriptions. ' :
+                'Generate a complete web page about: ' + query + '. ' +
+                'Include a header, 3-5 content sections with rich fictional details.'
+            ) +
+            'Use ONLY inline CSS — dark background (#111), light text, accent color #4fc3f7. ' +
+            'Return ONLY valid HTML starting with <div class="wpage"> and ending with </div>.';
+        var userPrompt = 'Generate the HTML page now. ' +
+            'CRITICAL: Do NOT use any tools or web search. Just write the HTML directly. ' +
+            'NO markdown code fences. NO explanations. Only HTML. ' +
+            'Make it creative and roleplay-immersive for what ' + user + ' and ' + charName + ' would see.';
+
         var s = getSettings();
         var apiBase = (s.phoneApiUrl || '').replace(/\/$/, '');
         var apiModel = s.phoneApiModel || 'gpt-4o-mini';
         var apiKey = s.phoneApiKey || '';
         var useDedicated = !!(apiBase && apiKey && apiModel);
-        
+
         var genUrl = useDedicated ? apiBase + '/chat/completions' : '/api/chat/completions';
         var headers = { 'Content-Type': 'application/json' };
         if (useDedicated && apiKey) headers['Authorization'] = 'Bearer ' + apiKey;
-        
+
         var payload = {
             messages: [
                 { role: 'system', content: systemPrompt },
                 { role: 'user', content: userPrompt }
             ],
             max_tokens: 1200,
-            temperature: 0.9
+            temperature: 0.9,
+            tool_choice: 'none' // Disable all tool use — prevents WebSearch and other ST tools
         };
         if (useDedicated) payload.model = apiModel;
         
