@@ -1053,14 +1053,21 @@ var BrowserApp = {
             '<button class="pgobtn" data-gourl="true"><i class="fa-solid fa-arrow-right"></i></button>' +
             '<button class="pkmbtn" data-bookmark="true"><i class="fa-regular fa-bookmark"></i></button>' +
             '</div>' +
-            '<div class="pbcont">' + (tab.html || this._newTab()) + '</div>';
+            '<div class="pbcont">' + (tab.html || this._newTab()) + '</div>' +
+            this._renderSearchBar();
+    },
+    _renderSearchBar: function() {
+        return '<div class="sbcont"><input class="sinput" id="searchBox" placeholder="Search the web..." />' +
+            '<button class="sb" data-browser-search="true"><i class="fa-solid fa-magnifying-glass"></i></button></div>';
     },
     _newTab: function() {
         var links=[
             {n:'Wiki',u:'w:Wikipedia',c:'#636363',i:'fa-brands fa-wikipedia-w'},
-            {n:'Example',u:'w:Example',c:'#2aa198',i:'fa-solid fa-paragraph'},
-            {n:'News',u:'w:News',c:'#dc322f',i:'fa-solid fa-newspaper'},
+            {n:'News',u:'w:News',c:'#d32f2f',i:'fa-solid fa-newspaper'},
+            {n:'Weather',u:'w:Weather',c:'#f57c00',i:'fa-solid fa-cloud-sun'},
+            {n:'Mail',u:'w:Mail',c:'#1565c0',i:'fa-solid fa-envelope'},
             {n:'Tech',u:'w:Technology',c:'#6c71c4',i:'fa-solid fa-microchip'},
+            {n:'Social',u:'w:Social',c:'#ad1457',i:'fa-solid fa-users'},
         ];
         var lk='';
         for(var li=0;li<links.length;li++){
@@ -1076,23 +1083,128 @@ var BrowserApp = {
         phoneData.browser.activeTabId=id;savePhoneData();renderUI();
     },
     navigateTo: function(tabId, url) {
+        var self = this;
         var tab=phoneData.browser.tabs.find(function(t){return t.id===tabId;});if(!tab)return;
         tab.url=url;
         if(url.startsWith('w:')){
             tab.title=url.substring(2);
-            tab.html='<div class="wpage"><div class="ws">Loading <b>'+url.substring(2)+'</b>...</div></div>';
+            tab.html='<div class="wpage"><div class="ws"><i class="fa-solid fa-spinner fa-spin"></i> Loading <b>'+url.substring(2)+'</b>...</div></div>';
+        } else if(url.trim().length>0 && !url.startsWith('http')){
+            // Treat as search query
+            tab.title = 'Search: ' + url;
+            tab.html='<div class="wpage"><div class="ws"><i class="fa-solid fa-spinner fa-spin"></i> Searching...</div></div>';
+            url = 's:' + url; // Mark as search
+            tab.url = url;
         } else {
             tab.title=url;
-            tab.html='<div class="wpage">Navigating to: '+url+'</div>';
+            tab.html='<div class="wpage"><div class="ws">Navigating to: '+url+'</div></div>';
         }
         phoneData.browser.history.push({id:randId(),url:url,title:tab.title,ts:Date.now()});
         savePhoneData();renderUI();
+        
+        // Generate LLM page content async
+        if(url.startsWith('w:') || url.startsWith('s:')) {
+            this.fetchPageContent(tabId, url);
+        }
     },
+    fetchPageContent: async function(tabId, url) {
+        var tab=phoneData.browser.tabs.find(function(t){return t.id===tabId;});if(!tab)return;
+        var query = url.substring(2); // Strip 'w:' or 's:'
+        var isSearch = url.startsWith('s:');
+        var pageType = isSearch ? 'search' : 'page';
+        var user = (typeof name1 !== 'undefined') ? name1 : 'You';
+        var charName = (typeof name2 !== 'undefined') ? name2 : 'the character';
+        
+        var systemPrompt = 'You are a mobile web page simulator. Generate a complete, self-contained mobile-friendly web page in HTML for the query: ' + query + '. ' +
+            'The page should look like a real mobile website with a dark theme. ' +
+            (isSearch ? 'Create a Google-style search results page with 4-5 results, each with a blue title, green URL, and gray snippet. ' : '') +
+            'Use inline CSS. Dark background (#111), white/light text. Include a header with the title.';
+        var userPrompt = 'Generate a rich, realistic HTML page for: ' + query + '. ' +
+            (isSearch ? 'Make it look like a search engine results page. ' : '') +
+            'Context: The user (' + user + ') is chatting with ' + charName + ' in a roleplay. ' +
+            'Keep the content relevant if possible, but always feel realistic. ' +
+            'IMPORTANT: Return ONLY the HTML content, NO markdown code blocks, NO explanation. ' +
+            'Start with <div class="wpage"> and end with </div>.';
+        
+        var s = getSettings();
+        var apiBase = (s.phoneApiUrl || '').replace(/\/$/, '');
+        var apiModel = s.phoneApiModel || 'gpt-4o-mini';
+        var apiKey = s.phoneApiKey || '';
+        var useDedicated = !!(apiBase && apiKey && apiModel);
+        
+        var genUrl = useDedicated ? apiBase + '/chat/completions' : '/api/chat/completions';
+        var headers = { 'Content-Type': 'application/json' };
+        if (useDedicated && apiKey) headers['Authorization'] = 'Bearer ' + apiKey;
+        
+        var payload = {
+            messages: [
+                { role: 'system', content: systemPrompt },
+                { role: 'user', content: userPrompt }
+            ],
+            max_tokens: 1200,
+            temperature: 0.9
+        };
+        if (useDedicated) payload.model = apiModel;
+        
+        try {
+            var res = await fetch(genUrl, { method: 'POST', headers: headers, body: JSON.stringify(payload) });
+            var data = await res.json();
+            if (data && data.choices && data.choices[0] && data.choices[0].message) {
+                var html = data.choices[0].message.content;
+                // Strip markdown fences if present
+                html = html.replace(/^```html\n?/, '').replace(/\n```$/, '');
+                tab.html = html;
+                tab.title = query.charAt(0).toUpperCase() + query.slice(1);
+                savePhoneData();
+                // Refresh UI only if this tab is still active
+                if(phoneData.browser.activeTabId === tabId) renderUI();
+                console.log('[Phone Extension] Browser page generated: ' + query);
+            } else {
+                throw new Error('Empty response');
+            }
+        } catch (e) {
+            console.warn('[Phone Extension] Browser page generation failed:', e.message);
+            var fallback = '<div class="wpage">' +
+                '<div class="whead"><h3>' + this._esc(query) + '</h3></div>' +
+                (isSearch ?
+                    '<div class="warticle"><p>No results found for <b>' + this._esc(query) + '</b>. Try a different search.</p></div>' :
+                    '<div class="warticle"><p>Unable to load content. Check your API settings.</p></div>'
+                ) + '</div>';
+            tab.html = fallback;
+            savePhoneData();
+            if(phoneData.browser.activeTabId === tabId) renderUI();
+        }
+    },
+    _esc: function(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); },
     bookmarkUrl: function() {
         var tab=phoneData.browser.tabs.find(function(t){return t.id===phoneData.browser.activeTabId;});
         if(!tab||!tab.url){if(typeof toastr!=='undefined')toastr.info('Navigate first');return;}
         var bm=phoneData.browser.bookmarks;
         if(!bm.includes(tab.url)){bm.push(tab.url);savePhoneData();if(typeof toastr!=='undefined')toastr.success('Bookmarked');}
+        else{if(typeof toastr!=='undefined')toastr.info('Already bookmarked');}
+    },
+    viewBookmarks: function() {
+        var bm=phoneData.browser.bookmarks;
+        if(!bm.length){
+            var empty='<div class="wpage"><div class="whead"><h3><i class="fa-regular fa-bookmark"></i> Bookmarks</h3></div>' +
+                '<div class="warticle"><p>No bookmarks saved yet.</p></div></div>';
+            this._showBookmarkContent(empty);
+            return;
+        }
+        var html = '<div class="wpage"><div class="whead"><h3><i class="fa-regular fa-bookmark"></i> Bookmarks</h3></div>';
+        for(var i=0;i<bm.length;i++) {
+            var label = bm[i].startsWith('w:') || bm[i].startsWith('s:') ? bm[i].substring(2) : bm[i];
+            html += '<div class="wlink" data-browser-nav="'+bm[i]+'">' +
+                '<i class="fa-solid fa-link"></i> ' + this._esc(label) + '<br><small>' + this._esc(bm[i]) + '</small></div>';
+        }
+        html += '</div>';
+        this._showBookmarkContent(html);
+    },
+    _showBookmarkContent: function(html) {
+        var tab=phoneData.browser.tabs.find(function(t){return t.id===phoneData.browser.activeTabId;});
+        if(!tab) return;
+        tab.title='Bookmarks'; tab.url='bookmarks:'; tab.html=html;
+        savePhoneData(); renderUI();
     }
 };
 
@@ -1225,7 +1337,8 @@ function updateDock() {
 function _phoneClickHandler(e) {
     var t = e.target.closest('[data-dock],[data-key],[data-backspace],[data-call],[data-clear-calls],[data-call-c],'+
         '[data-msg-view],[data-open-c],[data-send-c],[data-new-post],[data-st],[data-post-id],[data-new-tab],'+
-        '[data-tid],[data-ctab],[data-gourl],[data-bookmark],[data-nav],[data-urlbar],[data-reset],[data-scan],[data-section],[data-submit-post],[data-test-api]');
+        '[data-tid],[data-ctab],[data-gourl],[data-bookmark],[data-nav],[data-urlbar],[data-reset],[data-scan],[data-section],[data-submit-post],[data-test-api],'+
+        '[data-browser-search],[data-bookmarks-view],[data-browser-nav]');
     if (!t) return;
     try {
         // Dock
@@ -1272,6 +1385,13 @@ function _phoneClickHandler(e) {
         if (t.dataset.bookmark) { BrowserApp.bookmarkUrl(); return; }
         if (t.dataset.nav) { if(phoneData.browser.activeTabId) BrowserApp.navigateTo(phoneData.browser.activeTabId,t.dataset.nav); return; }
         if (t.dataset.urlbar) { var bar=document.getElementById('pbar'); if(bar) bar.style.display=bar.style.display==='flex'?'none':'flex'; return; }
+        if (t.dataset.browserSearch) {
+            var sb=document.getElementById('searchBox');
+            if(sb && sb.value.trim()) BrowserApp.searchWeb(phoneData.browser.activeTabId || (phoneData.browser.tabs.length ? phoneData.browser.tabs[0].id : null), sb.value.trim());
+            return;
+        }
+        if (t.dataset.bookmarksView) { BrowserApp.viewBookmarks(); return; }
+        if (t.dataset.browserNav) { if(phoneData.browser.activeTabId) BrowserApp.navigateTo(phoneData.browser.activeTabId, t.dataset.browserNav); return; }
         // Settings buttons
         if (t.dataset.scan) { scanChatForContacts(); if(typeof toastr!=='undefined') toastr.success('Scan complete — check console'); return; }
         if (t.dataset.reset) { if(confirm('Reset ALL phone data for this chat?')){ phoneData=getEmptyPhoneData(); savePhoneData(); renderUI(); if(typeof toastr!=='undefined') toastr.success('Phone data reset'); } return; }
@@ -1285,6 +1405,12 @@ function _phoneKeydownHandler(e) {
     if(e.key==='Enter'&&m&&!e.shiftKey){e.preventDefault();var sb=document.querySelector('[data-send-c]');if(sb)MessagesApp.sendMsg(sb.dataset.sendC);}
     var u=document.getElementById('burl');
     if(e.key==='Enter'&&u&&phoneData.browser.activeTabId){e.preventDefault();BrowserApp.navigateTo(phoneData.browser.activeTabId,u.value);}
+    // Search bar enter
+    var sb2=document.getElementById('searchBox');
+    if(sb2 && e.target===sb2 && e.key==='Enter') {
+        e.preventDefault();
+        if(sb2.value.trim()) BrowserApp.searchWeb(phoneData.browser.activeTabId || (phoneData.browser.tabs.length ? phoneData.browser.tabs[0].id : null), sb2.value.trim());
+    }
 }
 
 function bindEvents() {
