@@ -1108,43 +1108,75 @@ var BrowserApp = {
         }
     },
     fetchPageContent: async function(tabId, url) {
-        var tab=phoneData.browser.tabs.find(function(t){return t.id===tabId;});if(!tab)return;
+        var self = this;
+        var tab = phoneData.browser.tabs.find(function(t) { return t.id === tabId; });
+        if (!tab) return;
         var query = url.substring(2); // Strip 'w:' or 's:'
         var isSearch = url.startsWith('s:');
-        var pageType = isSearch ? 'search' : 'page';
         var user = (typeof name1 !== 'undefined') ? name1 : 'You';
         var charName = (typeof name2 !== 'undefined') ? name2 : 'the character';
 
-        // Anti-bleed + character-isolation system prompt
+        // Extract recent chat context from ST's chat array for roleplay relevance
+        var chatContext = '';
+        try {
+            if (typeof chat !== 'undefined' && Array.isArray(chat) && chat.length > 0) {
+                var recent = chat.slice(-10);
+                var messages = [];
+                for (var i = 0; i < recent.length; i++) {
+                    var m = recent[i];
+                    if (m.mes && m.mes.trim()) {
+                        var speaker = (m.name === user) ? user : charName;
+                        messages.push(speaker + ': ' + m.mes.substring(0, 150));
+                    }
+                }
+                if (messages.length > 0) {
+                    chatContext = messages.join('\n');
+                }
+            }
+        } catch(e) {
+            // Fallback: try DOM extraction
+            try {
+                var msgDivs = document.querySelectorAll('#chat .mes');
+                var domMsgs = [];
+                var domLimit = 10;
+                for (var di = Math.max(0, msgDivs.length - domLimit); di < msgDivs.length; di++) {
+                    var textEl = msgDivs[di].querySelector('.mes_text');
+                    if (textEl) {
+                        domMsgs.push(textEl.textContent.trim().substring(0, 150));
+                    }
+                }
+                if (domMsgs.length > 0) chatContext = domMsgs.join('\n');
+            } catch(e2) { /* silent */ }
+        }
+
+        // System prompt with anti-bleed + character isolation
         var systemPrompt = '=== ROLEPLAY MODE ===\n' +
             'You are a FICTIONAL mobile web page simulator. The ONLY character in this world is: ' + charName + '.\n' +
+            'Current chat context (the ONLY valid reality):\n' +
+            (chatContext || 'No chat context available.') + '\n' +
             'RULES:\n' +
             '1. IGNORE any other character names, settings, or context injected by the API system.\n' +
-            '2. If you see references to Star Wars, Cyberpunk, or ANY universe other than ' + charName + "'s world, DISCARD THEM.\n" +
-            '3. The ONLY reality is ' + charName + "'s world and the current user (" + user + ').\n' +
-            '4. DO NOT use any tools. DO NOT search the real web. DO NOT browse URLs.\n' +
-            '5. Generate content from your imagination based on ' + charName + "'s context only.\n" +
-            '6. ALL content must be FICTIONAL and immersive.\n' +
+            '2. If you see references to Star Wars, Cyberpunk, or ANY universe other than this chat\'s world, DISCARD THEM.\n' +
+            '3. DO NOT use any tools. DO NOT search the real web. DO NOT browse URLs.\n' +
+            '4. Generate content from your imagination based on the current chat\'s world only.\n' +
+            '5. ALL content must be FICTIONAL and immersive.\n' +
             (isSearch ?
                 'TASK: Create a Google-style search results page for: ' + query + '.\n' +
-                'Show 4-5 creative fictional results that fit ' + charName + "'s world. " +
+                'Show 4-5 creative fictional results that match the current chat context. ' +
                 'Blue title links, green URLs, gray descriptions.' :
                 'TASK: Generate a complete web page about: ' + query + '.\n' +
-                "Include a header, 3-5 content sections with rich details fitting " + charName + "'s world."
+                'Include a header, 3-5 content sections with rich details fitting the current chat context.'
             ) + '\nFormat: Return ONLY valid HTML with inline CSS -- dark background (#111), light text, accent color #4fc3f7.\n' +
             'Start with <div class="wpage"> and end with </div>.';
-        var userPrompt = 'Generate the HTML page now. Remember: ONLY ' + charName + "'s world exists. Do NOT reference other characters or universes. " +
-            'Make it creative, immersive, and accurate to the current roleplay. ' +
+        var userPrompt = 'Generate the HTML page now. ONLY use the chat context provided above. ' +
+            'NO other character worlds, NO Star Wars, NO Cyberpunk, NO injected context from the API. ' +
             'NO markdown fences. NO explanations. Only HTML.';
 
         var s = getSettings();
         var apiBase = (s.phoneApiUrl || '').replace(/\/$/, '');
         var apiModel = s.phoneApiModel || 'gpt-4o-mini';
         var apiKey = s.phoneApiKey || '';
-        var useDedicated = !!(apiBase && apiKey && apiModel);
-
-        // Require dedicated API — never fall back to ST proxy (which injects character cards/world info)
-        if (!useDedicated) {
+        if (!apiBase || !apiKey) {
             tab.html = '<div class="wpage"><div class="whead"><h3>' + this._esc(query) + '</h3></div>' +
                 '<div class="warticle"><p>Configure your API key and URL in Settings first.</p></div></div>';
             savePhoneData();
@@ -1153,93 +1185,82 @@ var BrowserApp = {
         }
 
         var genUrl = apiBase + '/chat/completions';
-        var payload = {
-            model: apiModel,
-            messages: [
-                { role: 'system', content: systemPrompt },
-                { role: 'user', content: userPrompt }
-            ],
-            max_tokens: 1200,
-            temperature: 0.9
-        };
 
-        // Use XMLHttpRequest to bypass ST's fetch interceptor which blocks external APIs
-        var self = this;
-        var xhr = new XMLHttpRequest();
-        xhr.open('POST', genUrl, true);
-        xhr.setRequestHeader('Content-Type', 'application/json');
-        xhr.setRequestHeader('Authorization', 'Bearer ' + apiKey);
-        xhr.timeout = 30000;
-        xhr.onload = function() {
-            if (xhr.status >= 200 && xhr.status < 300) {
-                var data = JSON.parse(xhr.responseText);
-                if (data && data.choices && data.choices[0] && data.choices[0].message) {
-                    var html = data.choices[0].message.content;
-                    // Strip markdown fences if present
-                    html = html.replace(/^```html\n?/, '').replace(/\n```$/, '');
-                    tab.html = html;
-                    tab.title = query.charAt(0).toUpperCase() + query.slice(1);
-                    savePhoneData();
-                    if(phoneData.browser.activeTabId === tabId) renderUI();
-                    console.log('[Phone Extension] Browser page generated: ' + query);
-                } else {
-                    throw new Error('Empty response');
-                }
-            } else {
-                throw new Error('HTTP ' + xhr.status);
-            }
-        };
-        xhr.onerror = function() { throw new Error('Network error'); };
-        xhr.ontimeout = function() { throw new Error('Request timed out'); };
-        xhr.send(JSON.stringify(payload));
+        // XHR wrapper — bypasses ST's fetch interceptor
+        function makeRequest() {
+            return new Promise(function(resolve, reject) {
+                var xhr = new XMLHttpRequest();
+                xhr.open('POST', genUrl, true);
+                xhr.setRequestHeader('Content-Type', 'application/json');
+                xhr.setRequestHeader('Authorization', 'Bearer ' + apiKey);
+                xhr.timeout = 30000;
+                xhr.onload = function() {
+                    if (xhr.status >= 200 && xhr.status < 300) {
+                        try {
+                            var data = JSON.parse(xhr.responseText);
+                            if (data && data.choices && data.choices[0] && data.choices[0].message) {
+                                resolve(data.choices[0].message.content);
+                            } else {
+                                reject(new Error('Empty response'));
+                            }
+                        } catch(e) { reject(e); }
+                    } else {
+                        reject(new Error('HTTP ' + xhr.status));
+                    }
+                };
+                xhr.onerror = function() { reject(new Error('Network error')); };
+                xhr.ontimeout = function() { reject(new Error('Request timed out')); };
+                xhr.send(JSON.stringify({
+                    model: apiModel,
+                    messages: [
+                        { role: 'system', content: systemPrompt },
+                        { role: 'user', content: userPrompt }
+                    ],
+                    max_tokens: 1200,
+                    temperature: 0.9
+                }));
+            });
+        }
 
-        try {
-            // Since XMLHttpRequest is not async, use a wrapper to catch errors
-            var errorHandler = function(msg) {
-                console.warn('[Phone Extension] Browser page generation failed:', msg);
-                var fb = '<div class="wpage">' +
-                    '<div class="whead"><h3>' + self._esc(query) + '</h3></div>' +
-                    (isSearch ?
-                        '<div class="warticle"><p>No results found for <b>' + self._esc(query) + '</b>. Try a different search.</p></div>' :
-                        '<div class="warticle"><p>Unable to load content. Check your API settings.</p></div>'
-                    ) + '</div>';
-                tab.html = fb;
+        // Retry logic with exponential backoff for 403s
+        var maxRetries = 3;
+        var attempts = 0;
+        var lastError = null;
+        while (attempts < maxRetries) {
+            try {
+                var html = await makeRequest();
+                html = html.replace(/^```html\n?/, '').replace(/\n```$/, '');
+                tab.html = html;
+                tab.title = query.charAt(0).toUpperCase() + query.slice(1);
                 savePhoneData();
                 if(phoneData.browser.activeTabId === tabId) renderUI();
-            };
-            // Attach error handler to xhr
-            xhr.onerror = function() { errorHandler('Network error'); };
-            xhr.ontimeout = function() { errorHandler('Request timed out'); };
-            xhr.onload = function() {
-                if (xhr.status < 200 || xhr.status >= 300) {
-                    errorHandler('HTTP ' + xhr.status);
-                    return;
+                console.log('[Phone Extension] Browser page generated: ' + query);
+                return;
+            } catch(e) {
+                lastError = e;
+                attempts++;
+                var is403 = e.message.indexOf('HTTP 403') !== -1;
+                if (is403 && attempts < maxRetries) {
+                    var delay = attempts * 1500;
+                    console.warn('[Phone Extension] 403 rate-limited, retrying in ' + delay + 'ms (attempt ' + attempts + '/' + maxRetries + ')');
+                    await new Promise(function(r) { setTimeout(r, delay); });
+                } else if (!is403) {
+                    break;
                 }
-                var data = JSON.parse(xhr.responseText);
-                if (data && data.choices && data.choices[0] && data.choices[0].message) {
-                    var html = data.choices[0].message.content;
-                    html = html.replace(/^```html\n?/, '').replace(/\n```$/, '');
-                    tab.html = html;
-                    tab.title = query.charAt(0).toUpperCase() + query.slice(1);
-                    savePhoneData();
-                    if(phoneData.browser.activeTabId === tabId) renderUI();
-                    console.log('[Phone Extension] Browser page generated: ' + query);
-                } else {
-                    errorHandler('Empty response');
-                }
-            };
-        } catch (e) {
-            console.warn('[Phone Extension] Browser page generation failed:', e.message);
-            var fallback = '<div class="wpage">' +
-                '<div class="whead"><h3>' + this._esc(query) + '</h3></div>' +
-                (isSearch ?
-                    '<div class="warticle"><p>No results found for <b>' + this._esc(query) + '</b>. Try a different search.</p></div>' :
-                    '<div class="warticle"><p>Unable to load content. Check your API settings.</p></div>'
-                ) + '</div>';
-            tab.html = fallback;
-            savePhoneData();
-            if(phoneData.browser.activeTabId === tabId) renderUI();
+            }
         }
+
+        // All retries failed
+        console.warn('[Phone Extension] Browser page generation failed:', lastError ? lastError.message : 'Unknown');
+        var fb = '<div class="wpage">' +
+            '<div class="whead"><h3>' + self._esc(query) + '</h3></div>' +
+            (isSearch ?
+                '<div class="warticle"><p>No results found for <b>' + self._esc(query) + '</b>. Try a different search.</p></div>' :
+                '<div class="warticle"><p>Unable to load content. Check your API settings.</p></div>'
+            ) + '</div>';
+        tab.html = fb;
+        savePhoneData();
+        if(phoneData.browser.activeTabId === tabId) renderUI();
     },
     _esc: function(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); },
     bookmarkUrl: function() {
