@@ -25,14 +25,23 @@ function getDefaultPhoneSettings() {
         npcAutoTexts: true,        // Allow NPCs to initiate texts
         npcTextFrequency: 5,       // Minutes between auto-texts
         lastAutoText: 0,           // Timestamp of last auto-text
-        notifications: true,       // Show toast on new texts
+        notifications: true,       // Show toast on new texts,
+        // Phone-specific LLM API
+        phoneApiUrl: 'https://api.openai.com/v1',
+        phoneApiKey: '',
+        phoneApiModel: 'gpt-4o-mini',
+        phoneApiProvider: 'openai',  // openai | openai-compatible
     };
 }
 
 function getSettings() {
     if (!phoneData.settings) phoneData.settings = getDefaultPhoneSettings();
-    // Backwards compat
+    // Backwards compat — add new fields if missing
     if (!phoneData.settings.hasOwnProperty('addToStory')) phoneData.settings.addToStory = true;
+    if (!phoneData.settings.hasOwnProperty('phoneApiUrl')) phoneData.settings.phoneApiUrl = 'https://api.openai.com/v1';
+    if (!phoneData.settings.hasOwnProperty('phoneApiKey')) phoneData.settings.phoneApiKey = '';
+    if (!phoneData.settings.hasOwnProperty('phoneApiModel')) phoneData.settings.phoneApiModel = 'gpt-4o-mini';
+    if (!phoneData.settings.hasOwnProperty('phoneApiProvider')) phoneData.settings.phoneApiProvider = 'openai';
     return phoneData.settings;
 }
 
@@ -586,6 +595,48 @@ async function generateNpcText(contact) {
     var systemPrompt = `You are ${charName}. You are texting the user on a phone. Keep the message short, casual, and in character. Max 20 words.`;
     var context = `The last thing you chatted about was a while ago. Text ${user} something relevant to your personality.`;
 
+    var s = getSettings();
+    var apiBase = s.phoneApiUrl || '';
+    var apiKey = s.phoneApiKey || '';
+    var apiModel = s.phoneApiModel || 'gpt-4o-mini';
+    
+    // If API settings are configured, use them; otherwise, fallback to built-in API
+    if (apiBase && apiKey) {
+        apiBase = apiBase.replace(/\/$/, '');
+        var url = apiBase + '/chat/completions';
+        var headers = {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer ' + apiKey
+        };
+        var body = JSON.stringify({
+            model: apiModel,
+            messages: [
+                { role: 'system', content: systemPrompt },
+                { role: 'user', content: context }
+            ],
+            max_tokens: 50,
+            temperature: 1.0
+        });
+        
+        try {
+            var res = await fetch(url, {
+                method: 'POST',
+                headers: headers,
+                body: body
+            });
+            var data = await res.json();
+            if (data && data.choices && data.choices[0] && data.choices[0].message) {
+                var text = data.choices[0].message.content.replace(/^["']|["']$/g,'').substring(0, 140);
+                receiveNpcText(contact, text);
+                console.log('[Phone Extension] NPC text generated via dedicated API (model: ' + apiModel + ')');
+                return;
+            }
+        } catch (e) {
+            console.warn('[Phone Extension] LLM text generation failed (url: ' + url + '):', e.message);
+        }
+    }
+    
+    // Fallback to local API if dedicated API fails or is not configured
     try {
         var res = await fetch('/api/chat/completions', {
             method: 'POST',
@@ -606,7 +657,7 @@ async function generateNpcText(contact) {
             return;
         }
     } catch (e) {
-        console.warn('[Phone Extension] LLM text generation failed:', e.message);
+        console.warn('[Phone Extension] Local LLM text generation failed:', e.message);
     }
 
     // Fallback: contextual generic
@@ -789,6 +840,48 @@ function triggerContextualReaction(contact, chatText, eventType) {
 }
 
 async function generateNpcTextWithContext(contact, systemPrompt, context) {
+    var s = getSettings();
+    var apiBase = s.phoneApiUrl || '';
+    var apiKey = s.phoneApiKey || '';
+    var apiModel = s.phoneApiModel || 'gpt-4o-mini';
+    
+    // If API settings are configured, use them; otherwise, fallback to built-in API
+    if (apiBase && apiKey) {
+        apiBase = apiBase.replace(/\/$/, '');
+        var url = apiBase + '/chat/completions';
+        var headers = {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer ' + apiKey
+        };
+        var body = JSON.stringify({
+            model: apiModel,
+            messages: [
+                { role: 'system', content: systemPrompt },
+                { role: 'user', content: context }
+            ],
+            max_tokens: 50,
+            temperature: 1.0
+        });
+        
+        try {
+            var res = await fetch(url, {
+                method: 'POST',
+                headers: headers,
+                body: body
+            });
+            var data = await res.json();
+            if (data && data.choices && data.choices[0] && data.choices[0].message) {
+                var text = data.choices[0].message.content.replace(/^["']|["']$/g, '').substring(0, 140);
+                receiveNpcText(contact, text);
+                console.log('[Phone Extension] Contextual text via dedicated API (model: ' + apiModel + ')');
+                return;
+            }
+        } catch (e) {
+            console.warn('[Phone Extension] Contextual LLM text generation failed (url: ' + url + '):', e.message);
+        }
+    }
+    
+    // Fallback to local API if dedicated API fails or is not configured
     try {
         var res = await fetch('/api/chat/completions', {
             method: 'POST',
@@ -1150,6 +1243,8 @@ var BrowserApp = {
 var SettingsApp = {
     render: function() {
         var s = getSettings();
+        var statusIcon = (s.phoneApiKey && s.phoneApiUrl) ? '<i class="fa-solid fa-circle" style="color:#4caf50;font-size:8px"></i>' : '<i class="fa-solid fa-circle" style="color:#f44336;font-size:8px"></i>';
+        var statusText = (s.phoneApiKey && s.phoneApiUrl) ? 'Configured' : 'Not configured';
         return '<div class="pa">' +
             '<div class="pa-header"><span class="pa-title"><i class="fa-solid fa-gear"></i> Settings</span></div>' +
             '<div class="sett">' +
@@ -1159,6 +1254,8 @@ var SettingsApp = {
                 {v:2,l:'Every 2 min'}, {v:5,l:'Every 5 min'}, {v:10,l:'Every 10 min'}, {v:20,l:'Every 20 min'}
             ], s.npcTextFrequency) +
             this._toggle('notifications', 'Notifications', 'Show toast alerts for new texts.') +
+            this._renderApiSection(s, statusIcon, statusText) +
+            '<button class="sbtn sbtn-scan" data-scan="true"><i class="fa-solid fa-address-book"></i> Scan for Contacts</button>' +
             '<button class="sbtn" data-reset="true"><i class="fa-solid fa-trash-can"></i> Reset Phone Data</button>' +
             '</div></div>';
     },
@@ -1178,6 +1275,69 @@ var SettingsApp = {
             html += '<option value="'+opts[i].v+'" '+sel+'>'+opts[i].l+'</option>';
         }
         return html + '</select></label></div>';
+    },
+    _renderApiSection: function(s, statusIcon, statusText) {
+        var html = '<div class="sett-item" style="margin-top:8px;padding:10px;border:1px solid rgba(79,195,247,.3);border-radius:4px;">' +
+            '<label class="sett-label" style="margin-bottom:6px"><span><i class="fa-solid fa-plug"></i> Text Generation API</span>' +
+            ' <small>'+statusIcon+' '+statusText+'</small></label>' +
+            '<small style="display:block;margin-bottom:4px">Dedicated LLM for NPC phone texts. Faster, cheaper, separate from your main ST API.</small>' +
+            '<label class="sett-label" style="margin-top:6px"><span>Provider</span>' +
+            '<select class="sett-sel" data-set="phoneApiProvider" style="width:100%">' +
+            '<option value="openai"'+(s.phoneApiProvider==='openai'?' selected':'')+'>OpenAI Compatible</option>' +
+            '</select></label>' +
+            '<label class="sett-label" style="margin-top:6px"><span>API Base URL</span>' +
+            '<input class="sett-input" data-set="phoneApiUrl" value="'+this._esc(s.phoneApiUrl||'')+'" placeholder="https://api.openai.com/v1" style="width:100%;box-sizing:border-box"/></label>' +
+            '<label class="sett-label" style="margin-top:6px"><span>API Key</span>' +
+            '<input class="sett-input" type="password" data-set="phoneApiKey" value="'+this._esc(s.phoneApiKey||'')+'" placeholder="sk-..." style="width:100%;box-sizing:border-box"/></label>' +
+            '<label class="sett-label" style="margin-top:6px"><span>Model</span>' +
+            '<input class="sett-input" data-set="phoneApiModel" value="'+this._esc(s.phoneApiModel||'gpt-4o-mini')+'" placeholder="gpt-4o-mini" style="width:100%;box-sizing:border-box"/></label>' +
+            '<button class="sbtn sbtn-test" data-test-api="true" style="margin-top:8px"><i class="fa-solid fa-flask"></i> Test API Connection</button>' +
+            '</div>';
+        return html;
+    },
+    _esc: function(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); },
+    testApi: function() {
+        var s = getSettings();
+        if (!s.phoneApiKey || !s.phoneApiUrl) {
+            if (typeof toastr !== 'undefined') toastr.warning('Set API Key and URL first');
+            return;
+        }
+        var url = (s.phoneApiUrl || '').replace(/\/$/, '') + '/chat/completions';
+        var btn = document.querySelector('[data-test-api]');
+        if (btn) btn.textContent = 'Testing...';
+        console.log('[Phone Extension] Testing API at ' + url + ' with model ' + s.phoneApiModel);
+        // Use XMLHttpRequest to bypass ST's fetch interceptor which blocks external APIs
+        var xhr = new XMLHttpRequest();
+        xhr.open('POST', url, true);
+        xhr.setRequestHeader('Content-Type', 'application/json');
+        xhr.setRequestHeader('Authorization', 'Bearer ' + s.phoneApiKey);
+        xhr.timeout = 15000;
+        xhr.onload = function() {
+            if (xhr.status >= 200 && xhr.status < 300) {
+                var data = JSON.parse(xhr.responseText);
+                console.log('[Phone Extension] API test OK:', data);
+                if (typeof toastr !== 'undefined') toastr.success('API test successful!');
+            } else {
+                console.warn('[Phone Extension] API test failed: HTTP ' + xhr.status);
+                if (typeof toastr !== 'undefined') toastr.error('API test failed: HTTP ' + xhr.status);
+            }
+            renderUI();
+        };
+        xhr.ontimeout = function() {
+            console.warn('[Phone Extension] API test timed out');
+            if (typeof toastr !== 'undefined') toastr.error('API test timed out');
+            renderUI();
+        };
+        xhr.onerror = function() {
+            console.warn('[Phone Extension] API test failed: network error');
+            if (typeof toastr !== 'undefined') toastr.error('API test failed: network error');
+            renderUI();
+        };
+        xhr.send(JSON.stringify({
+            model: s.phoneApiModel || 'gpt-4o-mini',
+            messages: [{ role: 'user', content: 'Reply with OK' }],
+            max_tokens: 5
+        }));
     }
 };
 
@@ -1218,7 +1378,8 @@ function updateDock() {
 function _phoneClickHandler(e) {
     var t = e.target.closest('[data-dock],[data-key],[data-backspace],[data-call],[data-clear-calls],[data-call-c],'+
         '[data-msg-view],[data-open-c],[data-send-c],[data-new-post],[data-st],[data-post-id],[data-new-tab],'+
-        '[data-tid],[data-ctab],[data-gourl],[data-bookmark],[data-nav],[data-urlbar],[data-reset],[data-preset]');
+        '[data-tid],[data-ctab],[data-gourl],[data-bookmark],[data-nav],[data-urlbar],[data-reset],[data-scan],[data-section],[data-submit-post],[data-test-api],'+
+        '[data-browser-search],[data-bookmarks-view],[data-browser-nav]');
     if (!t) return;
     try {
         // Dock
@@ -1266,6 +1427,8 @@ function _phoneClickHandler(e) {
         if (t.dataset.urlbar) { var bar=document.getElementById('pbar'); if(bar) bar.style.display=bar.style.display==='flex'?'none':'flex'; return; }
         // Settings / presets
         if (t.dataset.set) { PhoneApp.applyPreset(t.dataset.set); return; }
+        if (t.dataset.scan) { scanChatForContacts(); if(typeof toastr !== 'undefined') toastr.info('Scanning chat for contacts...'); return; }
+        if (t.dataset.testApi) { SettingsApp.testApi(); return; }
         if (t.dataset.reset) { if(confirm('Reset ALL phone data for this chat?')){ phoneData=getEmptyPhoneData(); savePhoneData(); renderUI(); if(typeof toastr!=='undefined') toastr.success('Phone data reset'); } return; }
     } catch(err) { console.warn('[Phone Extension] Click handler error:', err); }
 }
@@ -1291,13 +1454,34 @@ function bindEvents() {
     // Settings toggles (need change input, not click)
     var settings = document.querySelectorAll('[data-set].sett-chk');
     for(var i=0;i<settings.length;i++){(function(el){el.onchange=function(){
-        phoneData.settings[el.dataset.set]=el.checked; savePhoneData();
-        if(el.dataset.set==='npcTextFrequency'||el.dataset.set==='npcAutoTexts') startNpcAutoTextEngine();
+        var key = el.dataset.set;
+        phoneData.settings[key] = el.checked;
+        savePhoneData();
+        console.log('[Phone Extension] Setting changed: ' + key + ' = ' + el.checked);
+        if(key === 'npcAutoTexts') startNpcAutoTextEngine();
+        if(key === 'npcTextFrequency') startNpcAutoTextEngine();
     };})(settings[i]);}
+    // Settings selects
     var selects = document.querySelectorAll('select.sett-sel');
     for(var j=0;j<selects.length;j++){(function(el){el.onchange=function(){
-        phoneData.settings[el.dataset.set]=parseFloat(el.value); savePhoneData(); startNpcAutoTextEngine();
+        var key = el.dataset.set;
+        var val = (key === 'phoneApiProvider') ? el.value : parseFloat(el.value);
+        phoneData.settings[key] = val;
+        savePhoneData();
+        console.log('[Phone Extension] Setting changed: ' + key + ' = ' + val);
+        if(key === 'npcTextFrequency') startNpcAutoTextEngine();
     };})(selects[j]);}
+    // Settings text inputs (API config) — use 'input' event for live updates
+    var inputs = document.querySelectorAll('input.sett-input');
+    for(var k=0;k<inputs.length;k++){(function(el){el.oninput=function(){
+        var key = el.dataset.set;
+        phoneData.settings[key] = el.value;
+        // Debounced save — only save after user pauses typing for 500ms
+        clearTimeout(el._saveTimeout);
+        el._saveTimeout = setTimeout(function() {
+            savePhoneData();
+        }, 500);
+    };})(inputs[k]);}
 
     // Compose area character counter
     var sci = document.getElementById('sci');
