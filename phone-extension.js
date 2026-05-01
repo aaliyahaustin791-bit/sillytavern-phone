@@ -478,20 +478,31 @@ function getKnownCharacterNames() {
  * Scans the last N chat messages for character names (both spoken and mentioned).
  * Adds any new characters found as phone contacts.
  */
+var scanRetryCount = 0;
+var MAX_SCAN_RETRIES = 5;
+
 function scanChatForContacts() {
     var knownNames = getKnownCharacterNames();
+    
+    // If no known names, the characters array might not be loaded yet — retry a few times
+    if (!knownNames.length) {
+        scanRetryCount++;
+        if (scanRetryCount <= MAX_SCAN_RETRIES) {
+            console.log('[Phone Extension] No known character names yet (attempt ' + scanRetryCount + '/' + MAX_SCAN_RETRIES + '), retrying in 2s...');
+            setTimeout(scanChatForContacts, 2000);
+        } else {
+            console.log('[Phone Extension] No character names found after ' + MAX_SCAN_RETRIES + ' attempts. Contacts will be empty.');
+        }
+        return;
+    }
+    
+    // Reset retry count on success
+    scanRetryCount = 0;
     
     // Debug logging
     console.log('[Phone Extension] scanChatForContacts: knownNames=', knownNames);
     
-    // If no known names, the characters array might not be loaded yet — try again in 2s
-    if (!knownNames.length) {
-        console.log('[Phone Extension] No known character names yet, retrying in 2s...');
-        setTimeout(scanChatForContacts, 2000);
-        return;
-    }
-    
-    // Always ensure the current character is added as a contact
+    // Always ensure the current character is added as a contact (only if it's a real character)
     var currentCharName = null;
     if (typeof name2 !== 'undefined' && name2) {
         currentCharName = name2;
@@ -502,7 +513,7 @@ function scanChatForContacts() {
         }
     }
     console.log('[Phone Extension] Current character:', currentCharName);
-    if (currentCharName) {
+    if (currentCharName && knownNames.includes(currentCharName)) {
         var added = addOrUpdateContact(currentCharName, true);
         console.log('[Phone Extension] Added/updated current character contact:', currentCharName, 'new=', added);
     }
