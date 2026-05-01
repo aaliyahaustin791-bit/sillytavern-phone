@@ -461,16 +461,40 @@ function injectMessageToStory(text, direction, contactName) {
  */
 function getKnownCharacterNames() {
     var names = new Set();
+    
+    // Debug: log what's available
+    console.log('[Phone Extension] getKnownCharacterNames: checking for characters array and name2');
+    console.log('[Phone Extension] typeof characters:', typeof characters, Array.isArray(characters));
+    console.log('[Phone Extension] name2:', typeof name2, name2);
+    
     if (typeof characters !== 'undefined' && Array.isArray(characters)) {
+        console.log('[Phone Extension] characters array length:', characters.length);
         for (var i = 0; i < characters.length; i++) {
             if (characters[i] && characters[i].name) {
                 names.add(characters[i].name);
+                if (names.size <= 5) {
+                    console.log('[Phone Extension] Added character from array:', characters[i].name);
+                }
             }
         }
+    } else {
+        console.log('[Phone Extension] characters array not available or not an array');
     }
+    
     if (typeof name2 !== 'undefined' && name2) {
         names.add(name2);
+        console.log('[Phone Extension] Added name2:', name2);
+    } else {
+        console.log('[Phone Extension] name2 is undefined or empty');
     }
+    
+    // Also try to get from DOM as a last resort
+    var charNameEl = document.querySelector('#character_name_animation, #character_name, .char-name-element');
+    if (charNameEl && charNameEl.textContent.trim() && !names.has(charNameEl.textContent.trim())) {
+        names.add(charNameEl.textContent.trim());
+        console.log('[Phone Extension] Added from DOM:', charNameEl.textContent.trim());
+    }
+    
     return Array.from(names);
 }
 
