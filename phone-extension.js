@@ -1302,6 +1302,21 @@ var BrowserApp = {
         if(!tab) return;
         tab.title='Bookmarks'; tab.url='bookmarks:'; tab.html=html;
         savePhoneData(); renderUI();
+    },
+    /**
+     * Search the web — delegates to navigateTo with an 's:' URL,
+     * which triggers fetchPageContent to generate LLM-powered search
+     * results contextualized to the current chat.
+     */
+    searchWeb: function(tabId, query) {
+        if (!query || !query.trim()) return;
+        if (!tabId) {
+            // Open a new tab if none active
+            this.openNewTab();
+            tabId = phoneData.browser.activeTabId;
+        }
+        console.log('[Phone Extension] Browser search: "' + query + '" in tab ' + tabId);
+        this.navigateTo(tabId, query.trim());
     }
 };
 
