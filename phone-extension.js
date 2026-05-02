@@ -462,6 +462,167 @@ var ChatDatabank = {
 };
 
 // ============================================================
+// LLM CHAT ANALYZER — uses your configured API to scan chat and extract structured context
+// ============================================================
+var ChatAnalyzer = {
+    _cache: null,
+    _cacheKey: null,
+    _inFlight: false,
+
+    /**
+     * Send recent chat messages to the configured LLM API for structured extraction.
+     * Returns { characters: [], locations: [], items: [], topics: [], summary: "" }
+     */
+    analyze: async function(count) {
+        if (!count) count = 100;
+        if (this._inFlight) { console.log('[Phone Extension] ChatAnalyzer: already running, returning cached'); return this._cache; }
+
+        // Build chat context: speaker + text for each recent message
+        var msgs = [];
+        var chatArr = null;
+
+        // Try ST chat array first
+        if (typeof chat !== 'undefined' && Array.isArray(chat) && chat.length > 0) {
+            chatArr = chat;
+        } else if (typeof SillyTavern !== 'undefined' && typeof SillyTavern.getContext === 'function') {
+            try { var ctx = SillyTavern.getContext(); if (ctx && Array.isArray(ctx.chat)) chatArr = ctx.chat; } catch(e) {}
+        } else if (typeof chat_metadata !== 'undefined' && Array.isArray(chat_metadata.chat)) {
+            chatArr = chat_metadata.chat;
+        }
+
+        if (chatArr) {
+            var start = Math.max(0, chatArr.length - count);
+            for (var i = start; i < chatArr.length; i++) {
+                var m = chatArr[i];
+                if (!m || !m.mes || m.is_system) continue;
+                var speaker = 'Unknown';
+                if (m.is_user) speaker = 'User';
+                else if (m.name) speaker = m.name;
+                else if (typeof name2 !== 'undefined' && name2) speaker = name2;
+                msgs.push(speaker + ': ' + m.mes);
+            }
+        } else if (ChatDatabank.messages && ChatDatabank.messages.length > 0) {
+            for (var i = 0; i < ChatDatabank.messages.length; i++) {
+                var dm = ChatDatabank.messages[i];
+                msgs.push(dm.speaker + ': ' + dm.text);
+            }
+        }
+
+        if (msgs.length === 0) {
+            console.warn('[Phone Extension] ChatAnalyzer: no messages available to analyze');
+            return null;
+        }
+
+        // Cache key based on message count (avoid re-analyzing same chat)
+        var cacheKey = msgs.length + '_' + msgs[msgs.length - 1].substring(0, 50);
+        if (this._cache && this._cacheKey === cacheKey) {
+            console.log('[Phone Extension] ChatAnalyzer: returning cached result');
+            return this._cache;
+        }
+
+        var chatContext = msgs.join('\n\n');
+        // Truncate to ~30k chars to avoid token limits
+        if (chatContext.length > 30000) chatContext = chatContext.substring(0, 30000) + '\n...[truncated]';
+
+        var s = getSettings();
+        var apiBase = (s.phoneApiUrl || '').replace(/\/$/, '');
+        var apiKey = s.phoneApiKey || '';
+        var apiModel = s.phoneApiModel || 'gpt-4o-mini';
+
+        // If no API configured, try ST's local API
+        var url, headers;
+        if (apiBase && apiKey) {
+            url = apiBase + '/chat/completions';
+            headers = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + apiKey };
+        } else {
+            url = '/api/chat/completions';
+            headers = { 'Content-Type': 'application/json' };
+        }
+
+        this._inFlight = true;
+        console.log('[Phone Extension] ChatAnalyzer: sending ' + msgs.length + ' messages to LLM (' + apiModel + ')...');
+
+        try {
+            var res = await fetch(url, {
+                method: 'POST',
+                headers: headers,
+                body: JSON.stringify({
+                    model: apiModel,
+                    messages: [
+                        {
+                            role: 'system',
+                            content: 'You are a context extractor. Analyze chat messages and extract structured data as JSON. Return ONLY valid JSON with no markdown, no code fences, no explanation.'
+                        },
+                        {
+                            role: 'user',
+                            content: 'Analyze these chat messages and extract the following as JSON:\n' +
+                                '{\n' +
+                                '  "characters": ["list of named people/entities who are speakers or mentioned"],\n' +
+                                '  "locations": ["places mentioned"],\n' +
+                                '  "items": ["notable objects, items, tools mentioned"],\n' +
+                                '  "relationships": ["notable relationships between characters"],\n' +
+                                '  "topics": ["main topics/themes discussed"],\n' +
+                                '  "summary": "brief 2-3 sentence summary of what happened"\n' +
+                                '}\n\n' +
+                                'Rules:\n' +
+                                '- Only include actual character names, not chat titles, system labels, or generic terms\n' +
+                                '- Exclude: "You", "User", "Assistant", "SillyTavern System"\n' +
+                                '- Exclude chat titles, dates, file names\n' +
+                                '- Include NPCs, personas, and named entities\n' +
+                                '\nChat messages:\n' + chatContext
+                        }
+                    ],
+                    max_tokens: 500,
+                    temperature: 0.1
+                })
+            });
+
+            if (!res.ok) {
+                throw new Error('API returned ' + res.status + ': ' + res.statusText);
+            }
+
+            var data = await res.json();
+            var raw = data.choices[0].message.content;
+
+            // Strip markdown code fences if present
+            raw = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '');
+            var result = JSON.parse(raw);
+
+            // Validate and sanitize
+            if (!result || typeof result !== 'object') throw new Error('Invalid response format');
+            ['characters', 'locations', 'items', 'topics', 'relationships'].forEach(function(k) {
+                if (!Array.isArray(result[k])) result[k] = [];
+            });
+            if (!result.summary || typeof result.summary !== 'string') result.summary = '';
+
+            // Filter out false positives from the AI response
+            var FALSE_POSITIVES = ['SillyTavern System', 'SillyTavern', 'User', 'You', 'Assistant', 'System', 'Narrator', 'Character'];
+            result.characters = result.characters.filter(function(n) { return FALSE_POSITIVES.indexOf(n) === -1 && n.length > 1; });
+
+            this._cache = result;
+            this._cacheKey = cacheKey;
+            this._inFlight = false;
+
+            console.log('[Phone Extension] ChatAnalyzer: found', result.characters.length, 'characters,', result.locations.length, 'locations,', result.items.length, 'items');
+            return result;
+
+        } catch (e) {
+            this._inFlight = false;
+            console.error('[Phone Extension] ChatAnalyzer: LLM analysis failed:', e.message);
+            return null;
+        }
+    },
+
+    /**
+     * Clear the cache (useful after chat changes significantly)
+     */
+    clearCache: function() {
+        this._cache = null;
+        this._cacheKey = null;
+    }
+};
+
+// ============================================================
 // CHAT LORE EXTRACTOR — pulls world-building facts from chat
 // ============================================================
 var ChatLoreExtractor = {
@@ -828,8 +989,10 @@ function _getSafeChatTextBatch(count) {
  */
 var scanRetryCount = 0;
 var MAX_SCAN_RETRIES = 5;
+var llmScanInProgress = false;
+var llmContextCache = null;
 
-function scanChatForContacts() {
+async function scanChatForContacts() {
     // Check if chat is loaded before scanning
     var chatLoaded = false;
     if (typeof chat !== 'undefined' && Array.isArray(chat) && chat.length > 0) {
@@ -849,34 +1012,190 @@ function scanChatForContacts() {
         } else {
             console.log('[Phone Extension] Chat still not loaded after 20s, scanning anyway');
             scanRetryCount = 0;
-            performContactScan();
+            await performContactScan();
         }
         return;
     }
     
     scanRetryCount = 0;
-    performContactScan();
+    // STEP 1: Run LLM analysis FIRST — this extracts real names/context via API
+    await analyzeChatWithLLM();
+    // STEP 2: Then run the local contact scan using LLM-enriched data
+    await performContactScan();
 }
 
-function performContactScan() {
+/**
+ * LLM-powered chat analysis: sends chat messages to the configured API and extracts
+ * structured context (character names, locations, items, relationships) into the databank.
+ */
+async function analyzeChatWithLLM() {
+    if (llmScanInProgress) {
+        console.log('[Phone Extension] LLM scan already in progress, skipping');
+        return;
+    }
+    
+    var s = getSettings();
+    var apiBase = (s.phoneApiUrl || '').replace(/\/$/, '');
+    var apiKey = s.phoneApiKey || '';
+    var apiModel = s.phoneApiModel || 'gpt-4o-mini';
+    
+    if (!apiBase || !apiKey) {
+        console.log('[Phone Extension] LLM scan skipped: no API configured (set phoneApiUrl + phoneApiKey in settings)');
+        return;
+    }
+    
+    // Build chat context from databank or DOM scraping
+    var chatLines = [];
+    
+    // Try databank first
+    if (ChatDatabank && ChatDatabank.messages && ChatDatabank.messages.length > 0) {
+        var msgs = ChatDatabank.messages.slice(-60); // Last 60 messages
+        for (var i = 0; i < msgs.length; i++) {
+            var m = msgs[i];
+            if (m.isSystem) continue;
+            chatLines.push(m.speaker + ': ' + m.text);
+        }
+    }
+    
+    // Fallback: DOM scrape raw message text
+    if (chatLines.length === 0) {
+        var msgEls = document.querySelectorAll('#chat .mes');
+        if (!msgEls.length) return;
+        var limit = Math.min(60, msgEls.length);
+        var start = msgEls.length - limit;
+        for (var i = start; i < msgEls.length; i++) {
+            var mesEl = msgEls[i];
+            if (mesEl.classList.contains('system')) continue;
+            var text = (mesEl.querySelector('.mes_text, .text') || {}).textContent || '';
+            var speaker = 'Unknown';
+            if (mesEl.classList.contains('me')) speaker = 'You';
+            else {
+                var authorEl = mesEl.querySelector('.mes_author, .mes_name');
+                if (authorEl) speaker = authorEl.textContent.trim();
+            }
+            if (text.trim()) chatLines.push(speaker + ': ' + text.trim().substring(0, 500));
+        }
+    }
+    
+    if (chatLines.length === 0) return;
+    
+    var chatContext = chatLines.join('\n');
+    
+    var llmPrompt = "You are analyzing a SillyTavern roleplay chat to extract structured context for a phone contact system.\n\n" +
+        "Return ONLY a JSON object with this exact structure (no markdown, no explanation):\n" +
+        "{\n" +
+        '  "activeCharacter": "Name of the main character being chatted with",\n' +
+        '  "userName": "Name of the user/persona",\n' +
+        '  "characters": ["list of other NPC names found in conversation"],\n' +
+        '  "locations": ["places mentioned"],\n' +
+        '  "items": ["important objects mentioned"],\n' +
+        '  "summary": "One-sentence summary of what is happening in the chat"\n' +
+        "}\n\n" +
+        "If a field has no data, use an empty array or \"\". Keep it concise.\n\n" +
+        "Chat history:\n" + chatContext;
+    
+    llmScanInProgress = true;
+    console.log('[Phone Extension] LLM analyzing chat... (' + chatLines.length + ' messages via ' + apiModel + ')');
+    
+    try {
+        var res = await fetch(apiBase + '/chat/completions', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Bearer ' + apiKey
+            },
+            body: JSON.stringify({
+                model: apiModel,
+                messages: [{ role: 'user', content: llmPrompt }],
+                max_tokens: 500,
+                temperature: 0.1
+            })
+        });
+        
+        var data = await res.json();
+        if (data && data.choices && data.choices[0] && data.choices[0].message) {
+            var raw = data.choices[0].message.content;
+            // Strip markdown code blocks if present
+            raw = raw.replace(/^```(?:json)?\s*/gm, '').replace(/```\s*$/gm, '');
+            var result = JSON.parse(raw);
+            
+            console.log('[Phone Extension] LLM chat analysis result:', result);
+            
+            // Cache the result for contact scanning
+            llmContextCache = result;
+            
+            // Add active character and NPCs as contacts
+            if (result.activeCharacter) {
+                addOrUpdateContact(result.activeCharacter, true);
+                console.log('[Phone Extension] LLM detected active character:', result.activeCharacter);
+            }
+            if (result.userName) {
+                if (typeof name1 !== 'undefined' && !name1) {
+                    // Could set name1 if needed — but usually user sets this
+                }
+            }
+            if (Array.isArray(result.characters)) {
+                for (var i = 0; i < result.characters.length; i++) {
+                    addOrUpdateContact(result.characters[i], false);
+                }
+            }
+            
+            // Store extracted context in phoneData for browser/NPC use
+            phoneData._llmContext = result;
+            savePhoneData();
+            
+            return result;
+        }
+    } catch(e) {
+        console.warn('[Phone Extension] LLM chat analysis failed:', e.message);
+    } finally {
+        llmScanInProgress = false;
+    }
+    return null;
+}
+
+async function performContactScan() {
     var knownNames = getKnownCharacterNames();
     console.log('[Phone Extension] performContactScan: knownNames=', knownNames);
 
-    // --- Step 1: Identify and add the active character as a contact ---
+    // ============================================================
+    // Step 1: Try LLM-powered chat analysis (uses your configured API)
+    // ============================================================
+    var llmResult = null;
+    try {
+        llmResult = await analyzeChatWithLLM();
+        if (llmResult) {
+            console.log('[Phone Extension] LLM analysis succeeded — contacts updated from API response');
+        }
+    } catch(e) {
+        console.log('[Phone Extension] LLM analysis threw error:', e.message, '— falling back to local scan');
+    }
+
+    // If LLM returned results, also merge with any additional chars found locally
+    if (llmResult && llmResult.activeCharacter) {
+        addOrUpdateContact(llmResult.activeCharacter, true);
+        console.log('[Phone Extension] LLM main character:', llmResult.activeCharacter);
+    }
+    if (llmResult && Array.isArray(llmResult.characters)) {
+        for (var c = 0; c < llmResult.characters.length; c++) {
+            addOrUpdateContact(llmResult.characters[c], false);
+        }
+    }
+
+    // ============================================================
+    // Step 2: Local fallback — identify active character via ST globals/DOM
+    // ============================================================
     var currentCharName = null;
 
-    // Method 1: Try name2
-    if (typeof name2 !== 'undefined' && name2) {
+    if (typeof name2 !== 'undefined' && name2 && _isValidCharacterName(name2)) {
         currentCharName = name2;
     }
-    // Method 2: Try chid / this_chid
     if (!currentCharName && typeof characters !== 'undefined') {
         var activeIdx = (typeof this_chid !== 'undefined') ? this_chid : (typeof chid !== 'undefined' ? chid : null);
         if (activeIdx !== null && Array.isArray(characters) && characters[activeIdx] && characters[activeIdx].name) {
             currentCharName = characters[activeIdx].name;
         }
     }
-    // Method 3: DOM header
     if (!currentCharName) {
         var selectors = ['#character_name_animation', '#character_name', '.char-name-element', '.character_name'];
         for (var s = 0; s < selectors.length; s++) {
@@ -887,21 +1206,21 @@ function performContactScan() {
             }
         }
     }
-    // Filter: reject chat titles and system names
     if (currentCharName && !_isValidCharacterName(currentCharName)) {
         currentCharName = null;
     }
-    // Add the active character
-    if (currentCharName) {
+    // Add the active character if LLM didn't already cover it
+    if (currentCharName && (!llmResult || !llmResult.activeCharacter || llmResult.activeCharacter.toLowerCase() !== currentCharName.toLowerCase())) {
         addOrUpdateContact(currentCharName, true);
-        console.log('[Phone Extension] Active character contact:', currentCharName);
+        console.log('[Phone Extension] Active character contact (local scan):', currentCharName);
     }
 
-    // --- Step 2: Use ChatDatabank for structured per-message speaker data ---
+    // ============================================================
+    // Step 3: Scan databank speakers for additional NPC contacts
+    // ============================================================
     var found = new Set();
 
     if (ChatDatabank.messages && ChatDatabank.messages.length > 0) {
-        // Approach A: Extract unique speakers from databank messages
         var lowerKnown = {};
         for (var ki = 0; ki < knownNames.length; ki++) {
             lowerKnown[knownNames[ki].toLowerCase()] = knownNames[ki];
@@ -913,16 +1232,13 @@ function performContactScan() {
             var speaker = dbMsg.speaker;
             if (!speaker || speaker === 'Unknown' || speaker === 'You') continue;
             if (!_isValidCharacterName(speaker)) continue;
-            // Skip if it's the same as the current chat's main character
             if (currentCharName && speaker.toLowerCase() === currentCharName.toLowerCase()) continue;
-            // Check against known names if available; otherwise accept if it looks valid
+            if (llmResult && llmResult.activeCharacter && speaker.toLowerCase() === llmResult.activeCharacter.toLowerCase()) continue;
             if (lowerKnown[speaker.toLowerCase()]) {
                 found.add(lowerKnown[speaker.toLowerCase()]);
             } else if (!knownNames.length) {
-                // No known names available — trust valid speakers from the databank
                 found.add(speaker);
             }
-            // Also scan message text for mentions of OTHER characters
             var msgLower = dbMsg.text.toLowerCase();
             for (var ki2 = 0; ki2 < knownNames.length; ki2++) {
                 var nm = knownNames[ki2];
@@ -935,17 +1251,39 @@ function performContactScan() {
         }
     }
 
-    // --- Step 3: Add all found characters as contacts ---
+    // Also scan raw ST internal chat if available — look for msg.name fields
+    if (typeof chat !== 'undefined' && Array.isArray(chat)) {
+        var seenNames = {};
+        if (currentCharName) seenNames[currentCharName.toLowerCase()] = true;
+        if (llmResult && llmResult.activeCharacter) seenNames[llmResult.activeCharacter.toLowerCase()] = true;
+        var chatLimit = Math.min(200, chat.length);
+        var chatStart = Math.max(0, chat.length - chatLimit);
+        for (var ci = chatStart; ci < chat.length; ci++) {
+            var cm = chat[ci];
+            if (!cm || cm.is_user || cm.is_system) continue;
+            if (cm.name && _isValidCharacterName(cm.name) && !seenNames[cm.name.toLowerCase()]) {
+                seenNames[cm.name.toLowerCase()] = true;
+                addOrUpdateContact(cm.name, false);
+            }
+        }
+    }
+
+    // ============================================================
+    // Step 4: Merge LLM + local findings into contacts
+    // ============================================================
     var newContacts = 0;
     var foundArr = Array.from(found);
     for (var fi = 0; fi < foundArr.length; fi++) {
+        if (!_isValidCharacterName(foundArr[fi])) continue;
+        if (llmResult && llmResult.activeCharacter && foundArr[fi].toLowerCase() === llmResult.activeCharacter.toLowerCase()) continue;
         if (addOrUpdateContact(foundArr[fi], false)) {
             newContacts++;
         }
     }
 
-    if (newContacts > 0 || foundArr.length > 0) {
-        console.log('[Phone Extension] Scanned chat: found ' + foundArr.length + ' character(s), ' + newContacts + ' new contact(s)');
+    var totalContacts = phoneData.contacts.filter(function(c){ return c.isCharacter; }).length;
+    if (newContacts > 0 || foundArr.length > 0 || llmResult) {
+        console.log('[Phone Extension] Contact scan complete: ' + totalContacts + ' total character contacts');
         savePhoneData();
         if (activeApp === 'messages' || activeApp === 'phone') renderUI();
     }
@@ -1680,18 +2018,146 @@ var BrowserApp = {
         phoneData.browser.activeTabId=id;savePhoneData();renderUI();
     },
     navigateTo: function(tabId, url) {
+        var self = this;
         var tab=phoneData.browser.tabs.find(function(t){return t.id===tabId;});if(!tab)return;
         tab.url=url;
         if(url.startsWith('w:')){
             tab.title=url.substring(2);
             tab.html='<div class="wpage"><div class="ws">Loading <b>'+url.substring(2)+'</b>...</div></div>';
+            self._fetchWikiArticle(tab, url.substring(2));
+        } else if(url.indexOf('.') === -1 && url.length > 2) {
+            // Looks like a search query — use LLM to generate a response
+            tab.title='Search: '+url;
+            tab.html='<div class="wpage"><div class="ws">🔍 Searching "'+this._esc(url)+'"...</div></div>';
+            savePhoneData(); renderUI();
+            this._searchWithLLM(tab, url);
         } else {
             tab.title=url;
-            tab.html='<div class="wpage">Navigating to: '+url+'</div>';
+            tab.html='<div class="wpage">Navigating to: <a href="'+this._esc(url)+'" target="_blank">'+this._esc(url)+'</a></div>';
         }
         phoneData.browser.history.push({id:randId(),url:url,title:tab.title,ts:Date.now()});
         savePhoneData();renderUI();
     },
+    /**
+     * Uses the configured LLM API to generate a search result page.
+     * This makes a real API call every time the user searches.
+     */
+    _searchWithLLM: function(tab, query) {
+        var self = this;
+        var s = getSettings();
+        var apiBase = (s.phoneApiUrl || '').replace(/\/$/, '');
+        var apiKey = s.phoneApiKey || '';
+        var apiModel = s.phoneApiModel || 'gpt-4o-mini';
+
+        if (!apiBase || !apiKey) {
+            tab.html = '<div class="wpage"><div class="ws">⚠️ No API configured. Set your API key in Settings to enable search.</div></div>';
+            savePhoneData(); renderUI();
+            return;
+        }
+
+        var llmContext = phoneData._llmContext;
+        var contextStr = '';
+        if (llmContext) {
+            contextStr = '\n\nCurrent chat context:\n' +
+                '- Characters: ' + (llmContext.activeCharacter || 'Unknown') +\n' +
+                '- User: ' + (llmContext.userName || 'You') +\n' +
+                '- Summary: ' + (llmContext.summary || 'N/A') +\n' +
+                '- Locations: ' + (llmContext.locations || []).join(', ') +\n' +
+                '- Other NPCs: ' + (llmContext.characters || []).join(', ');
+        }
+
+        var prompt = 'The user is searching for "' + query.replace(/"/g, '\\"') + '" from within a phone in a roleplay game.' +
+            'Provide a helpful, in-universe response as if they used their phone to look this up.' +
+            'Keep it concise (2-4 short paragraphs). Use simple HTML formatting (<b>, <i>, <br>, <p>).' +
+            'If it\'s a real-world topic, give factual info. If it relates to their current situation, weave that in naturally.' + contextStr;
+
+        console.log('[Phone Extension] Browser search API call: "' + query + '" via ' + apiModel);
+
+        fetch(apiBase + '/chat/completions', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Bearer ' + apiKey
+            },
+            body: JSON.stringify({
+                model: apiModel,
+                messages: [{ role: 'user', content: prompt }],
+                max_tokens: 800,
+                temperature: 0.5
+            })
+        })
+        .then(function(res) { return res.json(); })
+        .then(function(data) {
+            if (data && data.choices && data.choices[0] && data.choices[0].message) {
+                var html = data.choices[0].message.content
+                    .replace(/^```(?:html)?\s*/gm, '').replace(/```\s*$/gm, '')
+                    .replace(/\n/g, '<br>');
+                tab.html = '<div class="wpage"><h3>🔍 Search: ' + self._esc(query) + '</h3>' + html + '</div>';
+            } else {
+                tab.html = '<div class="wpage"><div class="ws">⚠️ Search returned no results.</div></div>';
+            }
+            savePhoneData(); renderUI();
+        })
+        .catch(function(e) {
+            console.warn('[Phone Extension] Browser search failed:', e.message);
+            tab.html = '<div class="wpage"><div class="ws">⚠️ Search failed: ' + self._esc(e.message) + '</div></div>';
+            savePhoneData(); renderUI();
+        });
+    },
+    /**
+     * Fetches a wiki-style article using LLM.
+     */
+    _fetchWikiArticle: function(tab, topic) {
+        var self = this;
+        var s = getSettings();
+        var apiBase = (s.phoneApiUrl || '').replace(/\/$/, '');
+        var apiKey = s.phoneApiKey || '';
+        var apiModel = s.phoneApiModel || 'gpt-4o-mini';
+
+        if (!apiBase || !apiKey) {
+            tab.html = '<div class="wpage"><div class="ws">⚠️ No API configured. Set your API key in Settings to enable wiki.</div></div>';
+            savePhoneData(); renderUI();
+            return;
+        }
+
+        console.log('[Phone Extension] Browser wiki API call: "' + topic + '" via ' + apiModel);
+
+        fetch(apiBase + '/chat/completions', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Bearer ' + apiKey
+            },
+            body: JSON.stringify({
+                model: apiModel,
+                messages: [{
+                    role: 'user',
+                    content: 'Write a short encyclopedia-style article about "' + topic.replace(/"/g, '\\"') + '". ' +
+                        'Use HTML formatting (<h2>, <p>, <b>, <i>, <ul>, <li>). Keep it 3-5 paragraphs. Factual and informative.'
+                }],
+                max_tokens: 1000,
+                temperature: 0.3
+            })
+        })
+        .then(function(res) { return res.json(); })
+        .then(function(data) {
+            if (data && data.choices && data.choices[0] && data.choices[0].message) {
+                var html = data.choices[0].message.content
+                    .replace(/^```(?:html)?\s*/gm, '').replace(/```\s*$/gm, '');
+                tab.html = '<div class="wpage"><h2>' + self._esc(topic) + '</h2>' + html + '</div>';
+            } else {
+                tab.html = '<div class="wpage"><div class="ws">⚠️ Article not found.</div></div>';
+            }
+            savePhoneData(); renderUI();
+        })
+        .catch(function(e) {
+            console.warn('[Phone Extension] Browser wiki fetch failed:', e.message);
+            tab.html = '<div class="wpage"><div class="ws">⚠️ Failed to load article: ' + self._esc(e.message) + '</div></div>';
+            savePhoneData(); renderUI();
+        });
+    },
+    _esc: function(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); },
+    bookmarkUrl: function() {
     bookmarkUrl: function() {
         var tab=phoneData.browser.tabs.find(function(t){return t.id===phoneData.browser.activeTabId;});
         if(!tab||!tab.url){if(typeof toastr!=='undefined')toastr.info('Navigate first');return;}
