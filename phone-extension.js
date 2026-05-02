@@ -1874,3 +1874,40 @@ function injectPhone() {
         var poll = setInterval(function(){ attempts++; tryInit(); if(attempts >= 100) clearInterval(poll); }, 100);
     }
 })();
+
+// ============================================================
+// DIAGNOSTICS: Run in browser console with phoneDiag()
+// ============================================================
+function phoneDiag() {
+    var r = {};
+    r.name1 = typeof name1 !== 'undefined' ? name1 : 'UNDEFINED';
+    r.name2 = typeof name2 !== 'undefined' ? name2 : 'UNDEFINED';
+    r.this_chid = typeof this_chid !== 'undefined' ? this_chid : 'UNDEFINED';
+    r.characters = typeof characters !== 'undefined' ? (Array.isArray(characters)? 'Array['+characters.length+']' : 'Object('+Object.keys(characters).length+')') : 'UNDEFINED';
+    r.chat = typeof chat !== 'undefined' ? (Array.isArray(chat)? 'Array['+chat.length+']' : 'Object('+Object.keys(chat).length+')') : 'UNDEFINED';
+    r.chat_metadata = typeof chat_metadata !== 'undefined' ? 'exists' : 'UNDEFINED';
+    r.SillyTavern = typeof SillyTavern !== 'undefined' ? 'exists' : 'UNDEFINED';
+    r.getContext = typeof SillyTavern !== 'undefined' && typeof SillyTavern.getContext === 'function' ? 'works' : 'NOT available';
+    r.jQuery = typeof jQuery !== 'undefined' ? 'v'+jQuery.fn.jquery : 'UNDEFINED';
+    // Try jQuery data
+    if (typeof jQuery !== 'undefined') {
+        try { r.jQueryChatData = $('#chat').length ? 'el found, data='+!!$('#chat').data('chat') : '#chat NOT found'; } catch(e) { r.jQueryChatData = 'err: '+e.message; }
+    }
+    // Try getContext().chat
+    r.contextChat = 'N/A';
+    try {
+        if (typeof SillyTavern !== 'undefined' && typeof SillyTavern.getContext === 'function') {
+            var ctx = SillyTavern.getContext();
+            r.contextChat = ctx && ctx.chat ? 'Array['+ctx.chat.length+']' : 'null';
+            r.contextChar = ctx && ctx.characters ? (Array.isArray(ctx.characters)? 'Array['+ctx.characters.length+']' : 'Object') : 'none';
+            r.contextName2 = ctx && ctx.name2 ? ctx.name2 : 'none';
+        }
+    } catch(e) { r.contextChat = 'err: '+e.message; }
+    // DOM messages
+    r.domMsgs = document.querySelectorAll('#chat .mes').length;
+    r.domCharNameEl = document.querySelector('#character_name_animation, #character_name, .char-name-element');
+    r.domCharName = r.domCharNameEl ? r.domCharNameEl.textContent.trim() : 'NOT found';
+    console.log('=== Phone Extension Diagnostics ===');
+    console.table(r);
+    return r;
+}
