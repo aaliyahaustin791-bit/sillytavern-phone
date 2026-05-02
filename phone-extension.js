@@ -253,52 +253,94 @@ function getChatLengthSafe() {
 }
 
 // ============================================================
-// CHAT DATABANK — DOM-powered message cache independent of ST globals
+// CHAT DATABANK — Hybrid: ST chat array (primary) + DOM (fallback)
 // ============================================================
 var ChatDatabank = {
-    messages: [],   // [{ speaker: string, text: string, timestamp: number }]
-    lastDomCount: 0,
+    messages: [],   // [{ speaker: string, text: string, timestamp: number, raw: object }]
     _pollInterval: null,
     _observer: null,
+    _stEventBound: false,
 
     /**
-     * Scan #chat DOM for message blocks. Populates this.messages.
+     * Primary: Pull from ST's internal chat array. Fallback: DOM scrape.
      */
     scrape: function() {
-        var domMsgs = [];
-        var selectors = [
-            '#chat .mes .mes_text', '.mes .mes_text',
-            '#chat .mes .text', '.chat .mes .mes_text',
-            '#chat .mes p, #chat .mes .mes_text p'
-        ];
-        var msgEls = [];
-        for (var s = 0; s < selectors.length; s++) {
-            var found = document.querySelectorAll(selectors[s]);
-            if (found && found.length > 0) { msgEls = found; break; }
+        var result = [];
+        var chatArr = null;
+
+        // Method 1: ST global chat array (confirmed working in this version)
+        if (typeof chat !== 'undefined' && Array.isArray(chat) && chat.length > 0) {
+            chatArr = chat;
         }
+        // Method 2: chat_metadata.chat
+        if (!chatArr) {
+            try {
+                if (typeof chat_metadata !== 'undefined' && Array.isArray(chat_metadata.chat) && chat_metadata.chat.length > 0) {
+                    chatArr = chat_metadata.chat;
+                }
+            } catch(e) {}
+        }
+        // Method 3: SillyTavern.getContext()
+        if (!chatArr) {
+            try {
+                if (typeof SillyTavern !== 'undefined' && typeof SillyTavern.getContext === 'function') {
+                    var ctx = SillyTavern.getContext();
+                    if (ctx && Array.isArray(ctx.chat) && ctx.chat.length > 0) {
+                        chatArr = ctx.chat;
+                    }
+                }
+            } catch(e) {}
+        }
+
+        if (chatArr) {
+            for (var i = 0; i < chatArr.length; i++) {
+                var msg = chatArr[i];
+                if (!msg || !msg.mes) continue;
+                var speaker = 'Unknown';
+                if (typeof name1 !== 'undefined' && msg.is_user) speaker = name1;
+                else if (typeof name2 !== 'undefined' && !msg.is_user) speaker = name2;
+                else {
+                    // Try to extract from msg name field
+                    if (msg.name) speaker = msg.name;
+                    else if (msg.is_user) speaker = 'You';
+                }
+                result.push({
+                    speaker: speaker,
+                    text: msg.mes.trim().substring(0, 500),
+                    timestamp: msg.send_date ? new Date(msg.send_date).getTime() : Date.now(),
+                    raw: msg
+                });
+            }
+            this.messages = result;
+            return;
+        }
+
+        // Fallback: DOM scrape (only when internal access fails)
+        console.log('[Phone Extension] Databank: No internal chat available, falling back to DOM');
+        var msgEls = document.querySelectorAll('#chat .mes');
         if (!msgEls.length) { return; }
-        var limit = Math.min(50, msgEls.length);
-        var start = msgEls.length - limit;
-        for (var i = start; i < msgEls.length; i++) {
-            var el = msgEls[i];
-            var text = (el.textContent || '').trim().substring(0, 500);
+        for (var i = 0; i < msgEls.length; i++) {
+            var mesText = msgEls[i].querySelector('.mes_text, .text');
+            var text = mesText ? mesText.textContent.trim().substring(0, 500) : '';
             if (!text) continue;
             var speaker = 'Unknown';
-            var mesBlock = el.closest('.mes');
-            if (mesBlock) {
-                var authorAttr = mesBlock.getAttribute('data-author')
-                    || mesBlock.getAttribute('data-character')
-                    || mesBlock.getAttribute('ch_name');
-                if (authorAttr) { speaker = authorAttr.trim(); }
-                else {
-                    var nameEl = mesBlock.querySelector('.mes_name, .char-name');
-                    if (nameEl) speaker = nameEl.textContent.trim();
-                }
+            var mesBlock = msgEls[i];
+            // Try data attributes first
+            var authorAttr = mesBlock.getAttribute('data-author')
+                || mesBlock.getAttribute('data-character')
+                || mesBlock.getAttribute('ch_name');
+            if (authorAttr) {
+                speaker = authorAttr.trim();
+            } else if (msgEls[i].classList.contains('me')) {
+                speaker = (typeof name1 !== 'undefined') ? name1 : 'You';
+            } else {
+                // Try extracting from DOM structure
+                var nameEl = mesBlock.querySelector('.mes_name, .char-name, [data-name]');
+                if (nameEl) speaker = nameEl.textContent.trim();
             }
-            domMsgs.push({ speaker: speaker, text: text, timestamp: Date.now() });
+            result.push({ speaker: speaker, text: text, timestamp: Date.now(), raw: null });
         }
-        this.messages = domMsgs;
-        this.lastDomCount = msgEls.length;
+        this.messages = result;
     },
 
     /**
@@ -324,13 +366,35 @@ var ChatDatabank = {
     },
 
     /**
-     * Start periodic polling and MutationObserver.
+     * Refresh from ST chat array if available. Used after chat load.
+     */
+    forceRefresh: function() {
+        this.scrape();
+        console.log('[Phone Extension] Databank forceRefresh: ' + this.messages.length + ' messages cached');
+        // Auto-trigger contact scan after refresh
+        if (this.messages.length > 0) {
+            performContactScan();
+        }
+    },
+
+    /**
+     * Start: polling + MutationObserver + ST event hooks.
      */
     start: function() {
         this.scrape();
         var self = this;
+
+        // Poll every 3s (less aggressive, ST chat array is now primary)
         if (this._pollInterval) clearInterval(this._pollInterval);
-        this._pollInterval = setInterval(function() { self.scrape(); }, 5000);
+        this._pollInterval = setInterval(function() {
+            var oldLen = self.messages.length;
+            self.scrape();
+            if (self.messages.length !== oldLen) {
+                console.log('[Phone Extension] Databank: detected change, ' + self.messages.length + ' messages');
+            }
+        }, 3000);
+
+        // MutationObserver for DOM-based fallback
         if (window.MutationObserver && !this._observer) {
             var chatContainer = document.querySelector('#chat');
             if (chatContainer) {
@@ -339,10 +403,31 @@ var ChatDatabank = {
                     for (var m = 0; m < mutations.length; m++) {
                         if (mutations[m].addedNodes.length > 0) { changed = true; break; }
                     }
-                    if (changed) self.scrape();
+                    if (changed) { self.scrape(); }
                 });
                 this._observer.observe(chatContainer, { childList: true, subtree: true });
-                console.log('[Phone Extension] Databank: MutationObserver attached to #chat');
+            }
+        }
+
+        // Hook into ST's chat events
+        if (!this._stEventBound) {
+            this._stEventBound = true;
+            // ST fires chat_updated when a new message arrives
+            if (typeof jQuery !== 'undefined') {
+                $(document).on('chat_updated', function() {
+                    self.forceRefresh();
+                });
+                // Also listen for chatChanged (character switch)
+                $(document).on('chatChanged', function() {
+                    self.forceRefresh();
+                });
+            }
+            // Also try SillyTavern's event system
+            if (typeof SillyTavern !== 'undefined' && typeof SillyTavern.subscribe === 'function') {
+                try {
+                    SillyTavern.subscribe('chat_updated', function() { self.forceRefresh(); });
+                    SillyTavern.subscribe('chatChanged', function() { self.forceRefresh(); });
+                } catch(e) {}
             }
         }
         console.log('[Phone Extension] ChatDatabank started');
@@ -351,6 +436,11 @@ var ChatDatabank = {
     stop: function() {
         if (this._pollInterval) { clearInterval(this._pollInterval); this._pollInterval = null; }
         if (this._observer) { this._observer.disconnect(); this._observer = null; }
+        if (typeof jQuery !== 'undefined') {
+            $(document).off('chat_updated');
+            $(document).off('chatChanged');
+        }
+        this._stEventBound = false;
     }
 };
 
@@ -546,36 +636,88 @@ function injectMessageToStory(text, direction, contactName) {
 // ============================================================
 
 /*
- * Builds a list of known SillyTavern character names to match against.
- * Only includes the current character being chatted with — NOT the entire character library.
+ * Builds a list of known character names for the current chat session.
+ * Multi-method: globals → SillyTavern.getContext() → DOM → characters array scan.
  */
 function getKnownCharacterNames() {
     var names = new Set();
-    
-    // 1. Use the active character (name2 + this_chid)
+
+    // 1. Global name2 (works in some ST versions)
     if (typeof name2 !== 'undefined' && name2) {
         names.add(name2);
     }
-    
-    // 2. characters[this_chid] for multi-character scenes
-    if (typeof characters !== 'undefined' && typeof this_chid !== 'undefined') {
-        // this_chid can be a single index or an array
-        var ids = Array.isArray(this_chid) ? this_chid : [this_chid];
-        for (var i = 0; i < ids.length; i++) {
-            if (characters[ids[i]] && characters[ids[i]].name) {
-                names.add(characters[ids[i]].name);
+
+    // 2. SillyTavern.getContext() — most reliable for newer ST
+    try {
+        if (typeof SillyTavern !== 'undefined' && typeof SillyTavern.getContext === 'function') {
+            var ctx = SillyTavern.getContext();
+            if (ctx) {
+                // Try ctx.name2
+                if (ctx.name2) names.add(ctx.name2);
+                // Try ctx.chat[0] for the character name
+                if (ctx.name1 || ctx.name2) {
+                    // Some ST versions have ctx.name2
+                }
+                // Try group members if in group chat
+                if (ctx.groupMembers && Array.isArray(ctx.groupMembers)) {
+                    for (var gm = 0; gm < ctx.groupMembers.length; gm++) {
+                        if (ctx.groupMembers[gm] && ctx.groupMembers[gm].name) {
+                            names.add(ctx.groupMembers[gm].name);
+                        }
+                    }
+                }
+            }
+        }
+    } catch(e) {}
+
+    // 3. characters array — scan for active character via this_chid or index 0
+    if (typeof characters !== 'undefined') {
+        if (typeof this_chid !== 'undefined' && characters[this_chid]) {
+            if (characters[this_chid].name) names.add(characters[this_chid].name);
+        } else if (typeof chid !== 'undefined' && characters[chid]) {
+            if (characters[chid].name) names.add(characters[chid].name);
+        } else if (Array.isArray(characters) && characters.length > 0) {
+            // Some ST versions store as array
+            for (var c = 0; c < characters.length && c < 5; c++) {
+                if (characters[c] && characters[c].name) names.add(characters[c].name);
+            }
+        } else if (typeof characters === 'object') {
+            // Some ST versions store as object {0: {...}, 1: {...}}
+            var keys = Object.keys(characters).sort(function(a, b) { return parseInt(a) - parseInt(b); });
+            for (var k = 0; k < keys.length && k < 5; k++) {
+                if (characters[keys[k]] && characters[keys[k]].name) names.add(characters[keys[k]].name);
             }
         }
     }
-    
-    // 3. Fallback: DOM character name
-    if (!names.size) {
-        var charNameEl = document.querySelector('#character_name_animation, #character_name, .char-name-element, .character_name');
-        if (charNameEl && charNameEl.textContent.trim()) {
-            names.add(charNameEl.textContent.trim());
+
+    // 4. DOM extraction — always run as final catch
+    var domSelectors = [
+        '#character_name_animation',
+        '#character_name',
+        '.char-name-element',
+        '.character_name',
+        '#rightNavHolder .char_name',
+        '#rm_info_char_name',
+        '.interact_p .character_name',
+        '.mes_group .mes_name'
+    ];
+    for (var s = 0; s < domSelectors.length; s++) {
+        var el = document.querySelector(domSelectors[s]);
+        if (el && el.textContent.trim()) {
+            names.add(el.textContent.trim());
         }
     }
-    
+
+    // 5. jQuery-based: get the current character from ST's internal state
+    if (typeof jQuery !== 'undefined' && !names.size) {
+        try {
+            var $ = jQuery;
+            // Try #selected_t character textarea
+            var selectedChar = $('#selected_t').val();
+            if (selectedChar) names.add(selectedChar);
+        } catch(e) {}
+    }
+
     console.log('[Phone Extension] getKnownCharacterNames returning ' + names.size + ' characters:', Array.from(names));
     return Array.from(names);
 }
@@ -1821,10 +1963,19 @@ function injectPhone() {
     setTimeout(function(){
         phoneData=loadPhoneData();
         activeApp=phoneData._activeApp||'phone';
-        // Defer contact scanning to allow character data to load
+        // Start the ChatDatabank — it will auto-scan contacts when chat is ready
+        ChatDatabank.start();
+        // Delayed contact scan (1s) for initial load
         setTimeout(function() {
-            autoDetectContact();
+            scanChatForContacts();
         }, 1000);
+        // Additional delayed scan (3s) to catch late-loading character data
+        setTimeout(function() {
+            if (getKnownCharacterNames().length === 0) {
+                console.log('[Phone Extension] Re-attempting character detection after delay');
+            }
+            scanChatForContacts();
+        }, 3000);
         renderUI();
         startNpcAutoTextEngine();
     },300);
@@ -1865,7 +2016,7 @@ function injectPhone() {
         if(typeof toastr !== 'undefined'){
             initialized = true;
             injectPhone();
-            console.log('[Phone Extension v0.2.0] Initialized');
+            console.log('[Phone Extension v0.2.1] Initialized');
         }
     }
     tryInit();
@@ -1874,40 +2025,3 @@ function injectPhone() {
         var poll = setInterval(function(){ attempts++; tryInit(); if(attempts >= 100) clearInterval(poll); }, 100);
     }
 })();
-
-// ============================================================
-// DIAGNOSTICS: Run in browser console with phoneDiag()
-// ============================================================
-function phoneDiag() {
-    var r = {};
-    r.name1 = typeof name1 !== 'undefined' ? name1 : 'UNDEFINED';
-    r.name2 = typeof name2 !== 'undefined' ? name2 : 'UNDEFINED';
-    r.this_chid = typeof this_chid !== 'undefined' ? this_chid : 'UNDEFINED';
-    r.characters = typeof characters !== 'undefined' ? (Array.isArray(characters)? 'Array['+characters.length+']' : 'Object('+Object.keys(characters).length+')') : 'UNDEFINED';
-    r.chat = typeof chat !== 'undefined' ? (Array.isArray(chat)? 'Array['+chat.length+']' : 'Object('+Object.keys(chat).length+')') : 'UNDEFINED';
-    r.chat_metadata = typeof chat_metadata !== 'undefined' ? 'exists' : 'UNDEFINED';
-    r.SillyTavern = typeof SillyTavern !== 'undefined' ? 'exists' : 'UNDEFINED';
-    r.getContext = typeof SillyTavern !== 'undefined' && typeof SillyTavern.getContext === 'function' ? 'works' : 'NOT available';
-    r.jQuery = typeof jQuery !== 'undefined' ? 'v'+jQuery.fn.jquery : 'UNDEFINED';
-    // Try jQuery data
-    if (typeof jQuery !== 'undefined') {
-        try { r.jQueryChatData = $('#chat').length ? 'el found, data='+!!$('#chat').data('chat') : '#chat NOT found'; } catch(e) { r.jQueryChatData = 'err: '+e.message; }
-    }
-    // Try getContext().chat
-    r.contextChat = 'N/A';
-    try {
-        if (typeof SillyTavern !== 'undefined' && typeof SillyTavern.getContext === 'function') {
-            var ctx = SillyTavern.getContext();
-            r.contextChat = ctx && ctx.chat ? 'Array['+ctx.chat.length+']' : 'null';
-            r.contextChar = ctx && ctx.characters ? (Array.isArray(ctx.characters)? 'Array['+ctx.characters.length+']' : 'Object') : 'none';
-            r.contextName2 = ctx && ctx.name2 ? ctx.name2 : 'none';
-        }
-    } catch(e) { r.contextChat = 'err: '+e.message; }
-    // DOM messages
-    r.domMsgs = document.querySelectorAll('#chat .mes').length;
-    r.domCharNameEl = document.querySelector('#character_name_animation, #character_name, .char-name-element');
-    r.domCharName = r.domCharNameEl ? r.domCharNameEl.textContent.trim() : 'NOT found';
-    console.log('=== Phone Extension Diagnostics ===');
-    console.table(r);
-    return r;
-}
