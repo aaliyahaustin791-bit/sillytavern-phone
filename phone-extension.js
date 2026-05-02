@@ -297,18 +297,33 @@ var ChatDatabank = {
                 var msg = chatArr[i];
                 if (!msg || !msg.mes) continue;
                 var speaker = 'Unknown';
-                if (typeof name1 !== 'undefined' && msg.is_user) speaker = name1;
-                else if (typeof name2 !== 'undefined' && !msg.is_user) speaker = name2;
-                else {
-                    // Try to extract from msg name field
-                    if (msg.name) speaker = msg.name;
-                    else if (msg.is_user) speaker = 'You';
+                // Priority: msg.name (ST stores speaker name here) > is_user > globals
+                if (msg.name && msg.name !== 'You' && msg.name !== '') {
+                    speaker = msg.name;
+                } else if (msg.is_user) {
+                    speaker = (typeof name1 !== 'undefined' && name1) ? name1 : 'You';
+                } else if (msg.is_system) {
+                    continue; // Skip system messages (character cards, hidden msgs)
+                } else {
+                    // NPC message without explicit name — try globals then DOM name
+                    if (typeof name2 !== 'undefined' && name2) speaker = name2;
+                    else if (typeof msg.chid !== 'undefined' && typeof characters !== 'undefined' && Array.isArray(characters) && characters[msg.chid]) {
+                        speaker = characters[msg.chid].name || 'NPC';
+                    } else {
+                        speaker = 'NPC';
+                    }
                 }
+                // Skip messages that are clearly not actual chat (character cards > 2000 chars)
+                var msgText = msg.mes.trim();
+                if (msgText.length > 2000 && (speaker === 'Unknown' || speaker === 'NPC')) continue;
+
                 result.push({
                     speaker: speaker,
-                    text: msg.mes.trim().substring(0, 500),
+                    text: msgText.substring(0, 500),
                     timestamp: msg.send_date ? new Date(msg.send_date).getTime() : Date.now(),
-                    raw: msg
+                    raw: msg,
+                    isSystem: !!msg.is_system,
+                    isUser: !!msg.is_user
                 });
             }
             this.messages = result;
@@ -320,25 +335,27 @@ var ChatDatabank = {
         var msgEls = document.querySelectorAll('#chat .mes');
         if (!msgEls.length) { return; }
         for (var i = 0; i < msgEls.length; i++) {
-            var mesText = msgEls[i].querySelector('.mes_text, .text');
+            var mesBlock = msgEls[i];
+            // Skip hidden/system messages
+            if (mesBlock.classList.contains('system') || mesBlock.getAttribute('is_system') === 'true') continue;
+            if (mesBlock.classList.contains('chat_start')) continue;
+            var mesText = mesBlock.querySelector('.mes_text, .text');
             var text = mesText ? mesText.textContent.trim().substring(0, 500) : '';
             if (!text) continue;
             var speaker = 'Unknown';
-            var mesBlock = msgEls[i];
-            // Try data attributes first
+            // Try data attributes (ST uses data-author for character name)
             var authorAttr = mesBlock.getAttribute('data-author')
-                || mesBlock.getAttribute('data-character')
-                || mesBlock.getAttribute('ch_name');
-            if (authorAttr) {
+                || mesBlock.getAttribute('data-character');
+            if (authorAttr && authorAttr.trim()) {
                 speaker = authorAttr.trim();
-            } else if (msgEls[i].classList.contains('me')) {
-                speaker = (typeof name1 !== 'undefined') ? name1 : 'You';
-            } else {
-                // Try extracting from DOM structure
-                var nameEl = mesBlock.querySelector('.mes_name, .char-name, [data-name]');
-                if (nameEl) speaker = nameEl.textContent.trim();
+            } else if (mesBlock.classList.contains('me')) {
+                speaker = (typeof name1 !== 'undefined' && name1) ? name1 : 'You';
+            } else if (mesBlock.classList.contains('is_counted')) {
+                // Regular NPC message — try .mes_author span
+                var authorEl = mesBlock.querySelector('.mes_author, .mes_name, .char-name');
+                if (authorEl) speaker = authorEl.textContent.trim();
             }
-            result.push({ speaker: speaker, text: text, timestamp: Date.now(), raw: null });
+            result.push({ speaker: speaker, text: text, timestamp: Date.now(), raw: null, isSystem: false, isUser: mesBlock.classList.contains('me') });
         }
         this.messages = result;
     },
@@ -714,12 +731,51 @@ function getKnownCharacterNames() {
             var $ = jQuery;
             // Try #selected_t character textarea
             var selectedChar = $('#selected_t').val();
-            if (selectedChar) names.add(selectedChar);
+            if (selectedChar && _isValidCharacterName(selectedChar)) names.add(selectedChar);
         } catch(e) {}
     }
 
-    console.log('[Phone Extension] getKnownCharacterNames returning ' + names.size + ' characters:', Array.from(names));
-    return Array.from(names);
+    // 6. Extract NPC names from DOM message author labels
+    if (typeof jQuery !== 'undefined') {
+        try {
+            var $ = jQuery;
+            $('.mes:not(.me):not(.system) .mes_author, .mes:not(.me):not(.system) .mes_name').each(function() {
+                var n = $(this).text().trim();
+                if (n && _isValidCharacterName(n)) names.add(n);
+            });
+        } catch(e) {}
+    }
+
+    var resultArray = Array.from(names);
+    // Final filter: remove known false positives
+    var FALSE_POSITIVES = [
+        'SillyTavern System', 'SillyTavern',
+        'Character', 'User', 'You', 'Assistant',
+        'System', 'Narrator'
+    ];
+    resultArray = resultArray.filter(function(n) {
+        return FALSE_POSITIVES.indexOf(n) === -1;
+    });
+
+    console.log('[Phone Extension] getKnownCharacterNames returning ' + resultArray.length + ' characters:', resultArray);
+    return resultArray;
+}
+
+/**
+ * Validates that a name looks like an actual character name, not a chat title or system label.
+ */
+function _isValidCharacterName(name) {
+    if (!name) return false;
+    name = name.trim();
+    if (name.length < 2 || name.length > 50) return false;
+    // Reject chat titles (usually contain date/time patterns or are too long)
+    if (/\d{4}-\d{2}-\d{2}@/.test(name)) return false;
+    if (/^\d{1,2}[hH]\d{2}[msMS]/.test(name)) return false;
+    if (name.indexOf('Open World') !== -1) return false;
+    if (name.indexOf('University RPG') !== -1) return false;
+    // Reject names with slashes (paths) or brackets
+    if (/[\/\\\[\]{}]/.test(name)) return false;
+    return true;
 }
 
 /*
@@ -804,98 +860,82 @@ function scanChatForContacts() {
 
 function performContactScan() {
     var knownNames = getKnownCharacterNames();
-    
-    // Debug logging
-    console.log('[Phone Extension] scanChatForContacts: knownNames=', knownNames);
-    
-    // Always ensure the current character is added as a contact
+    console.log('[Phone Extension] performContactScan: knownNames=', knownNames);
+
+    // --- Step 1: Identify and add the active character as a contact ---
     var currentCharName = null;
-    
-    // Method 1: Try name2 (most reliable)
+
+    // Method 1: Try name2
     if (typeof name2 !== 'undefined' && name2) {
         currentCharName = name2;
-        console.log('[Phone Extension] Current character via name2:', currentCharName);
     }
-    
-    // Method 2: Try characters[this_chid]
-    if (!currentCharName && typeof characters !== 'undefined' && typeof this_chid !== 'undefined') {
-        if (characters[this_chid] && characters[this_chid].name) {
-            currentCharName = characters[this_chid].name;
-            console.log('[Phone Extension] Current character via characters[this_chid]:', currentCharName);
+    // Method 2: Try chid / this_chid
+    if (!currentCharName && typeof characters !== 'undefined') {
+        var activeIdx = (typeof this_chid !== 'undefined') ? this_chid : (typeof chid !== 'undefined' ? chid : null);
+        if (activeIdx !== null && Array.isArray(characters) && characters[activeIdx] && characters[activeIdx].name) {
+            currentCharName = characters[activeIdx].name;
         }
     }
-    
-    // Method 3: Try DOM (least reliable)
+    // Method 3: DOM header
     if (!currentCharName) {
         var selectors = ['#character_name_animation', '#character_name', '.char-name-element', '.character_name'];
         for (var s = 0; s < selectors.length; s++) {
-            var charHeader = document.querySelector(selectors[s]);
-            if (charHeader && charHeader.textContent.trim()) {
-                currentCharName = charHeader.textContent.trim();
-                console.log('[Phone Extension] Current character via DOM (' + selectors[s] + '):', currentCharName);
+            var el = document.querySelector(selectors[s]);
+            if (el && el.textContent.trim()) {
+                currentCharName = el.textContent.trim();
                 break;
             }
         }
     }
-    if (currentCharName && knownNames.includes(currentCharName)) {
-        var added = addOrUpdateContact(currentCharName, true);
-        console.log('[Phone Extension] Added/updated current character contact:', currentCharName, 'new=', added);
+    // Filter: reject chat titles and system names
+    if (currentCharName && !_isValidCharacterName(currentCharName)) {
+        currentCharName = null;
     }
-    
-    if (!knownNames.length) return;
-
-    var chatHist = _getSafeChatTextBatch(50);
-    // Also scrape from DOM as a second source
-    var msgBlocks = document.querySelectorAll('#chat .mes .mes_text, .mes .mes_text, #chat .mes .text');
-    var domLimit = Math.min(50, msgBlocks.length);
-    var domStart = msgBlocks.length - domLimit;
-    for (var dm = domStart; dm < msgBlocks.length; dm++) {
-        var t = (msgBlocks[dm].textContent || '').trim();
-        if (t) chatHist.push(t);
-    }
-    // Deduplicate while preserving order
-    var seenText = {};
-    var deduped = [];
-    for (var dd = chatHist.length - 1; dd >= 0; dd--) {
-        if (!seenText[chatHist[dd]]) {
-            seenText[chatHist[dd]] = true;
-            deduped.unshift(chatHist[dd]);
-        }
-    }
-    chatHist = deduped;
-    if (!chatHist.length) {
-        console.log('[Phone Extension] Contact scan: no chat text available');
-        return;
+    // Add the active character
+    if (currentCharName) {
+        addOrUpdateContact(currentCharName, true);
+        console.log('[Phone Extension] Active character contact:', currentCharName);
     }
 
+    // --- Step 2: Use ChatDatabank for structured per-message speaker data ---
     var found = new Set();
-    var lowerKnown = {};
-    for (var ki = 0; ki < knownNames.length; ki++) {
-        lowerKnown[knownNames[ki].toLowerCase()] = knownNames[ki];
-    }
 
-    for (var mi = 0; mi < chatHist.length; mi++) {
-        var msg = chatHist[mi].toLowerCase();
-        for (var ki2 = 0; ki2 < knownNames.length; ki2++) {
-            var nm = knownNames[ki2];
-            // Match the character name as a whole word (with word boundaries)
-            var re = new RegExp('\\b' + nm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'i');
-            if (re.test(msg)) {
-                found.add(nm);
+    if (ChatDatabank.messages && ChatDatabank.messages.length > 0) {
+        // Approach A: Extract unique speakers from databank messages
+        var lowerKnown = {};
+        for (var ki = 0; ki < knownNames.length; ki++) {
+            lowerKnown[knownNames[ki].toLowerCase()] = knownNames[ki];
+        }
+
+        for (var mi = 0; mi < ChatDatabank.messages.length; mi++) {
+            var dbMsg = ChatDatabank.messages[mi];
+            if (!dbMsg || dbMsg.isSystem) continue;
+            var speaker = dbMsg.speaker;
+            if (!speaker || speaker === 'Unknown' || speaker === 'You') continue;
+            if (!_isValidCharacterName(speaker)) continue;
+            // Skip if it's the same as the current chat's main character
+            if (currentCharName && speaker.toLowerCase() === currentCharName.toLowerCase()) continue;
+            // Check against known names if available; otherwise accept if it looks valid
+            if (lowerKnown[speaker.toLowerCase()]) {
+                found.add(lowerKnown[speaker.toLowerCase()]);
+            } else if (!knownNames.length) {
+                // No known names available — trust valid speakers from the databank
+                found.add(speaker);
+            }
+            // Also scan message text for mentions of OTHER characters
+            var msgLower = dbMsg.text.toLowerCase();
+            for (var ki2 = 0; ki2 < knownNames.length; ki2++) {
+                var nm = knownNames[ki2];
+                if (currentCharName && nm.toLowerCase() === currentCharName.toLowerCase()) continue;
+                var re = new RegExp('\\b' + nm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'i');
+                if (re.test(msgLower)) {
+                    found.add(nm);
+                }
             }
         }
-        // Also try to extract names from common patterns like "@Name", "Name said", etc.
-        var extractRe = /(?:@|"|\'|\s|^)([A-Z][a-zA-Z\s]{1,20})(?:\b(?:said|replied|texted|walked|looked|asked|smiled|laughed| nodded|whispered|shouted|spoke))?/g;
-        var m;
-        while ((m = extractRe.exec(chatHist[mi])) !== null) {
-            var candidate = m[1].replace(/["'@\s]/g, '').trim();
-            if (lowerKnown[candidate.toLowerCase()]) {
-                found.add(lowerKnown[candidate.toLowerCase()]);
-            }
-        }
     }
 
-    // Add all found characters as contacts
+    // --- Step 3: Add all found characters as contacts ---
     var newContacts = 0;
     var foundArr = Array.from(found);
     for (var fi = 0; fi < foundArr.length; fi++) {
@@ -904,10 +944,10 @@ function performContactScan() {
         }
     }
 
-    if (newContacts > 0) {
-        console.log('[Phone Extension] Scanned chat: found ' + newContacts + ' new contact(s)');
+    if (newContacts > 0 || foundArr.length > 0) {
+        console.log('[Phone Extension] Scanned chat: found ' + foundArr.length + ' character(s), ' + newContacts + ' new contact(s)');
         savePhoneData();
-        renderUI();
+        if (activeApp === 'messages' || activeApp === 'phone') renderUI();
     }
 }
 
