@@ -462,47 +462,52 @@ function injectMessageToStory(text, direction, contactName) {
 function getKnownCharacterNames() {
     var names = new Set();
     
-    // Get the current character being chatted with
-    var currentCharName = null;
-    
-    // Try to get context via SillyTavern.getContext()
-    var context = null;
-    if (typeof SillyTavern !== 'undefined' && typeof SillyTavern.getContext === 'function') {
-        context = SillyTavern.getContext();
-    }
-    
-    if (context) {
-        // Get the current character
-        if (context.characterId && context.characters) {
-            var chars = context.characters;
-            if (chars[context.characterId] && chars[context.characterId].name) {
-                currentCharName = chars[context.characterId].name;
-                console.log('[Phone Extension] Current character via context.characterId:', currentCharName);
+    // Try to get ALL characters from the characters object first
+    if (typeof characters !== 'undefined') {
+        for (var id in characters) {
+            if (characters[id] && characters[id].name) {
+                names.add(characters[id].name);
             }
         }
     }
     
-    // Fallback: check name2 (current character name)
-    if (!currentCharName && typeof name2 !== 'undefined' && name2) {
-        currentCharName = name2;
-        console.log('[Phone Extension] Current character via name2:', currentCharName);
+    // Also try SillyTavern.getContext() to get additional characters
+    if (typeof SillyTavern !== 'undefined' && typeof SillyTavern.getContext === 'function') {
+        try {
+            var context = SillyTavern.getContext();
+            if (context && context.characters) {
+                for (var id2 in context.characters) {
+                    if (context.characters[id2] && context.characters[id2].name) {
+                        names.add(context.characters[id2].name);
+                    }
+                }
+            }
+        } catch(e) {}
     }
     
-    // Fallback: DOM
-    if (!currentCharName) {
-        var charNameEl = document.querySelector('#character_name_animation, #character_name, .char-name-element');
-        if (charNameEl && charNameEl.textContent.trim()) {
-            currentCharName = charNameEl.textContent.trim();
-            console.log('[Phone Extension] Current character via DOM:', currentCharName);
+    // If still no names, try fallback methods
+    if (!names.size) {
+        var currentCharName = null;
+        
+        // Try name2
+        if (typeof name2 !== 'undefined' && name2) {
+            currentCharName = name2;
+        }
+        
+        // Try DOM
+        if (!currentCharName) {
+            var charNameEl = document.querySelector('#character_name_animation, #character_name, .char-name-element');
+            if (charNameEl && charNameEl.textContent.trim()) {
+                currentCharName = charNameEl.textContent.trim();
+            }
+        }
+        
+        if (currentCharName) {
+            names.add(currentCharName);
         }
     }
     
-    // Only add the current character to known names
-    if (currentCharName) {
-        names.add(currentCharName);
-    }
-    
-    console.log('[Phone Extension] getKnownCharacterNames returning:', Array.from(names));
+    console.log('[Phone Extension] getKnownCharacterNames returning ' + names.size + ' characters:', Array.from(names));
     return Array.from(names);
 }
 
@@ -558,37 +563,69 @@ var scanRetryCount = 0;
 var MAX_SCAN_RETRIES = 5;
 
 function scanChatForContacts() {
-    var knownNames = getKnownCharacterNames();
+    // Check if chat is loaded before scanning
+    var chatLoaded = false;
+    if (typeof chat !== 'undefined' && Array.isArray(chat) && chat.length > 0) {
+        chatLoaded = true;
+    } else if (typeof chat_metadata !== 'undefined' && chat_metadata && chat_metadata.chat && Array.isArray(chat_metadata.chat) && chat_metadata.chat.length > 0) {
+        chatLoaded = true;
+    } else {
+        var msgCount = document.querySelectorAll('#chat .mes').length;
+        if (msgCount > 0) chatLoaded = true;
+    }
     
-    // If no known names, the characters array might not be loaded yet — retry a few times
-    if (!knownNames.length) {
+    if (!chatLoaded) {
         scanRetryCount++;
-        if (scanRetryCount <= MAX_SCAN_RETRIES) {
-            console.log('[Phone Extension] No known character names yet (attempt ' + scanRetryCount + '/' + MAX_SCAN_RETRIES + '), retrying in 2s...');
+        if (scanRetryCount <= 10) {
+            console.log('[Phone Extension] Chat not loaded yet (attempt ' + scanRetryCount + '/10), waiting...');
             setTimeout(scanChatForContacts, 2000);
         } else {
-            console.log('[Phone Extension] No character names found after ' + MAX_SCAN_RETRIES + ' attempts. Contacts will be empty.');
+            console.log('[Phone Extension] Chat still not loaded after 20s, scanning anyway');
+            scanRetryCount = 0;
+            performContactScan();
         }
         return;
     }
     
-    // Reset retry count on success
     scanRetryCount = 0;
+    performContactScan();
+}
+
+function performContactScan() {
+    var knownNames = getKnownCharacterNames();
     
     // Debug logging
     console.log('[Phone Extension] scanChatForContacts: knownNames=', knownNames);
     
-    // Always ensure the current character is added as a contact (only if it's a real character)
+    // Always ensure the current character is added as a contact
     var currentCharName = null;
+    
+    // Method 1: Try name2 (most reliable)
     if (typeof name2 !== 'undefined' && name2) {
         currentCharName = name2;
-    } else {
-        var charHeader = document.querySelector('#character_name_animation, #character_name, .char-name-element');
-        if (charHeader && charHeader.textContent.trim()) {
-            currentCharName = charHeader.textContent.trim();
+        console.log('[Phone Extension] Current character via name2:', currentCharName);
+    }
+    
+    // Method 2: Try characters[this_chid]
+    if (!currentCharName && typeof characters !== 'undefined' && typeof this_chid !== 'undefined') {
+        if (characters[this_chid] && characters[this_chid].name) {
+            currentCharName = characters[this_chid].name;
+            console.log('[Phone Extension] Current character via characters[this_chid]:', currentCharName);
         }
     }
-    console.log('[Phone Extension] Current character:', currentCharName);
+    
+    // Method 3: Try DOM (least reliable)
+    if (!currentCharName) {
+        var selectors = ['#character_name_animation', '#character_name', '.char-name-element', '.character_name'];
+        for (var s = 0; s < selectors.length; s++) {
+            var charHeader = document.querySelector(selectors[s]);
+            if (charHeader && charHeader.textContent.trim()) {
+                currentCharName = charHeader.textContent.trim();
+                console.log('[Phone Extension] Current character via DOM (' + selectors[s] + '):', currentCharName);
+                break;
+            }
+        }
+    }
     if (currentCharName && knownNames.includes(currentCharName)) {
         var added = addOrUpdateContact(currentCharName, true);
         console.log('[Phone Extension] Added/updated current character contact:', currentCharName, 'new=', added);
