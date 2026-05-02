@@ -163,6 +163,96 @@ function fmtTime(ts) { return new Date(ts).toLocaleTimeString([],{hour:'2-digit'
 function fmtAgo(ts) { var d=Date.now()-ts; if(d<6e4) return 'just now'; if(d<36e5) return Math.floor(d/6e4)+'m'; if(d<864e5) return fmtTime(ts); return new Date(ts).toLocaleDateString(); }
 
 // ============================================================
+// SAFE CHAT ACCESSORS — bridge to ST's chat system with fallbacks
+// ============================================================
+
+/**
+ * Safely retrieve the ST chat message array with multiple fallback methods.
+ * Returns an array of message objects or an empty array.
+ */
+function getChatMessagesSafe() {
+    // Method 1: Direct chat array (ST's global)
+    if (typeof chat !== 'undefined' && Array.isArray(chat)) {
+        return chat;
+    }
+    // Method 2: chat_metadata.chat
+    try {
+        if (typeof chat_metadata !== 'undefined' && chat_metadata && Array.isArray(chat_metadata.chat)) {
+            return chat_metadata.chat;
+        }
+    } catch(e) {}
+    // Method 3: SillyTavern.getContext()
+    try {
+        if (typeof SillyTavern !== 'undefined' && typeof SillyTavern.getContext === 'function') {
+            var ctx = SillyTavern.getContext();
+            if (ctx && Array.isArray(ctx.chat)) return ctx.chat;
+        }
+    } catch(e) {}
+    // Method 4: jQuery-based access (common in ST)
+    try {
+        if (typeof jQuery !== 'undefined') {
+            var $ = jQuery;
+            var chatEl = $('#chat');
+            if (chatEl.length && chatEl.data('chat')) {
+                return chatEl.data('chat');
+            }
+        }
+    } catch(e) {}
+    // Method 5: DOM scrape — build a fake chat array from rendered messages
+    try {
+        var msgEls = document.querySelectorAll('#chat .mes');
+        var result = [];
+        for (var i = 0; i < msgEls.length; i++) {
+            var mesText = msgEls[i].querySelector('.mes_text, .text');
+            var text = mesText ? mesText.textContent.trim() : '';
+            var sender = msgEls[i].classList.contains('me') ? (typeof name1 !== 'undefined' ? name1 : 'You') : 'Unknown';
+            result.push({ mes: text, name: sender, is_user: sender !== 'Unknown' });
+        }
+        return result;
+    } catch(e) {}
+    return [];
+}
+
+/**
+ * Safely push a message object into ST's chat array.
+ * Returns true if successful, false otherwise.
+ */
+function pushChatMessageSafe(msgObj) {
+    // Method 1: Direct chat array
+    if (typeof chat !== 'undefined' && Array.isArray(chat)) {
+        chat.push(msgObj);
+        return true;
+    }
+    // Method 2: chat_metadata.chat
+    try {
+        if (typeof chat_metadata !== 'undefined' && chat_metadata && Array.isArray(chat_metadata.chat)) {
+            chat_metadata.chat.push(msgObj);
+            return true;
+        }
+    } catch(e) {}
+    // Method 3: SillyTavern.getContext()
+    try {
+        if (typeof SillyTavern !== 'undefined' && typeof SillyTavern.getContext === 'function') {
+            var ctx = SillyTavern.getContext();
+            if (ctx && Array.isArray(ctx.chat)) {
+                ctx.chat.push(msgObj);
+                return true;
+            }
+        }
+    } catch(e) {}
+    console.warn('[Phone Extension] pushChatMessageSafe: could not push message — chat not available');
+    return false;
+}
+
+/**
+ * Safely get the current chat message count.
+ */
+function getChatLengthSafe() {
+    var msgs = getChatMessagesSafe();
+    return msgs ? msgs.length : 0;
+}
+
+// ============================================================
 // CHAT DATABANK — DOM-powered message cache independent of ST globals
 // ============================================================
 var ChatDatabank = {
@@ -457,53 +547,32 @@ function injectMessageToStory(text, direction, contactName) {
 
 /*
  * Builds a list of known SillyTavern character names to match against.
- * Only includes the current character being chatted with.
+ * Only includes the current character being chatted with — NOT the entire character library.
  */
 function getKnownCharacterNames() {
     var names = new Set();
     
-    // Try to get ALL characters from the characters object first
-    if (typeof characters !== 'undefined') {
-        for (var id in characters) {
-            if (characters[id] && characters[id].name) {
-                names.add(characters[id].name);
+    // 1. Use the active character (name2 + this_chid)
+    if (typeof name2 !== 'undefined' && name2) {
+        names.add(name2);
+    }
+    
+    // 2. characters[this_chid] for multi-character scenes
+    if (typeof characters !== 'undefined' && typeof this_chid !== 'undefined') {
+        // this_chid can be a single index or an array
+        var ids = Array.isArray(this_chid) ? this_chid : [this_chid];
+        for (var i = 0; i < ids.length; i++) {
+            if (characters[ids[i]] && characters[ids[i]].name) {
+                names.add(characters[ids[i]].name);
             }
         }
     }
     
-    // Also try SillyTavern.getContext() to get additional characters
-    if (typeof SillyTavern !== 'undefined' && typeof SillyTavern.getContext === 'function') {
-        try {
-            var context = SillyTavern.getContext();
-            if (context && context.characters) {
-                for (var id2 in context.characters) {
-                    if (context.characters[id2] && context.characters[id2].name) {
-                        names.add(context.characters[id2].name);
-                    }
-                }
-            }
-        } catch(e) {}
-    }
-    
-    // If still no names, try fallback methods
+    // 3. Fallback: DOM character name
     if (!names.size) {
-        var currentCharName = null;
-        
-        // Try name2
-        if (typeof name2 !== 'undefined' && name2) {
-            currentCharName = name2;
-        }
-        
-        // Try DOM
-        if (!currentCharName) {
-            var charNameEl = document.querySelector('#character_name_animation, #character_name, .char-name-element');
-            if (charNameEl && charNameEl.textContent.trim()) {
-                currentCharName = charNameEl.textContent.trim();
-            }
-        }
-        
-        if (currentCharName) {
-            names.add(currentCharName);
+        var charNameEl = document.querySelector('#character_name_animation, #character_name, .char-name-element, .character_name');
+        if (charNameEl && charNameEl.textContent.trim()) {
+            names.add(charNameEl.textContent.trim());
         }
     }
     
