@@ -2059,10 +2059,10 @@ var BrowserApp = {
         var contextStr = '';
         if (llmContext) {
             contextStr = '\n\nCurrent chat context:\n' +
-                '- Characters: ' + (llmContext.activeCharacter || 'Unknown') +\n' +
-                '- User: ' + (llmContext.userName || 'You') +\n' +
-                '- Summary: ' + (llmContext.summary || 'N/A') +\n' +
-                '- Locations: ' + (llmContext.locations || []).join(', ') +\n' +
+                '- Characters: ' + (llmContext.activeCharacter || 'Unknown') + '\n' +
+                '- User: ' + (llmContext.userName || 'You') + '\n' +
+                '- Summary: ' + (llmContext.summary || 'N/A') + '\n' +
+                '- Locations: ' + (llmContext.locations || []).join(', ') + '\n' +
                 '- Other NPCs: ' + (llmContext.characters || []).join(', ');
         }
 
