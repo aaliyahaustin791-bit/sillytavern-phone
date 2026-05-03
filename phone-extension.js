@@ -1167,84 +1167,88 @@ async function analyzeChatWithLLM(maxRetries) {
     llmScanInProgress = true;
     console.log('[Phone Extension] LLM analyzing chat... (' + chatLines.length + ' messages via ' + apiModel + ')');
     
-    var attempt = 0;
-    while (attempt <= maxRetries) {
-        try {
-            var bodyObj = {
-                model: apiModel,
-                messages: [{ role: 'user', content: llmPrompt }],
-                max_tokens: 2000,
-                temperature: 0.1
-            };
-            
-            // OpenAI-compatible JSON mode (works with many backends including DeepSeek)
-            bodyObj.response_format = { type: 'json_object' };
-            
-            var res = await fetch(apiBase + '/chat/completions', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': 'Bearer ' + apiKey
-                },
-                body: JSON.stringify(bodyObj)
-            });
-            
-            var data = await res.json();
-            if (data && data.choices && data.choices[0] && data.choices[0].message) {
-                var raw = data.choices[0].message.content;
-                var result = _repairJSON(raw);
+    try {
+        var attempt = 0;
+        while (attempt <= maxRetries) {
+            try {
+                var bodyObj = {
+                    model: apiModel,
+                    messages: [{ role: 'user', content: llmPrompt }],
+                    max_tokens: 2000,
+                    temperature: 0.1
+                };
                 
-                if (!result) {
-                    // Retry on parse failure (might be a transient truncation)
-                    attempt++;
-                    if (attempt <= maxRetries) {
-                        console.log('[Phone Extension] JSON repair failed, retrying (' + attempt + '/' + maxRetries + ')...');
-                        continue;
+                // OpenAI-compatible JSON mode (works with many backends including DeepSeek)
+                bodyObj.response_format = { type: 'json_object' };
+                
+                var res = await fetch(apiBase + '/chat/completions', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': 'Bearer ' + apiKey
+                    },
+                    body: JSON.stringify(bodyObj)
+                });
+                
+                var data = await res.json();
+                if (data && data.choices && data.choices[0] && data.choices[0].message) {
+                    var raw = data.choices[0].message.content;
+                    var result = _repairJSON(raw);
+                    
+                    if (!result) {
+                        // Retry on parse failure (might be a transient truncation)
+                        attempt++;
+                        if (attempt <= maxRetries) {
+                            console.log('[Phone Extension] JSON repair failed, retrying (' + attempt + '/' + maxRetries + ')...');
+                            continue;
+                        }
+                        console.warn('[Phone Extension] LLM returned unparseable response after ' + (maxRetries + 1) + ' attempts');
+                        break;
                     }
-                    console.warn('[Phone Extension] LLM returned unparseable response after ' + (maxRetries + 1) + ' attempts');
-                    break;
-                }
-                
-                // Validate and filter extracted data
-                result = _validateLLMExtracted(result);
-                
-                console.log('[Phone Extension] LLM chat analysis result:', result);
-                
-                // Cache the result for contact scanning
-                llmContextCache = result;
-                
-                // Add active character as a contact
-                if (result.activeCharacter) {
-                    addOrUpdateContact(result.activeCharacter, true);
-                    console.log('[Phone Extension] LLM detected active character:', result.activeCharacter);
-                }
-                
-                // Add other NPC characters as contacts
-                if (Array.isArray(result.characters)) {
-                    for (var i = 0; i < result.characters.length; i++) {
-                        addOrUpdateContact(result.characters[i], false);
-                        console.log('[Phone Extension] LLM detected NPC:', result.characters[i]);
+                    
+                    // Validate and filter extracted data
+                    result = _validateLLMExtracted(result);
+                    
+                    console.log('[Phone Extension] LLM chat analysis result:', result);
+                    
+                    // Cache the result for contact scanning
+                    llmContextCache = result;
+                    
+                    // Add active character as a contact
+                    if (result.activeCharacter) {
+                        addOrUpdateContact(result.activeCharacter, true);
+                        console.log('[Phone Extension] LLM detected active character:', result.activeCharacter);
                     }
+                    
+                    // Add other NPC characters as contacts
+                    if (Array.isArray(result.characters)) {
+                        for (var i = 0; i < result.characters.length; i++) {
+                            addOrUpdateContact(result.characters[i], false);
+                            console.log('[Phone Extension] LLM detected NPC:', result.characters[i]);
+                        }
+                    }
+                    
+                    // Store extracted context in phoneData for browser/NPC use
+                    phoneData._llmContext = result;
+                    savePhoneData();
+                    
+                    return result;
                 }
-                
-                // Store extracted context in phoneData for browser/NPC use
-                phoneData._llmContext = result;
-                savePhoneData();
-                
-                return result;
+            } catch(e) {
+                attempt++;
+                if (attempt <= maxRetries) {
+                    console.log('[Phone Extension] LLM analysis error (retry ' + attempt + '/' + maxRetries + '):', e.message);
+                    continue;
+                }
+                console.warn('[Phone Extension] LLM chat analysis failed:', e.message);
             }
-        } catch(e) {
-            attempt++;
-            if (attempt <= maxRetries) {
-                console.log('[Phone Extension] LLM analysis error (retry ' + attempt + '/' + maxRetries + '):', e.message);
-                continue;
-            }
-            console.warn('[Phone Extension] LLM chat analysis failed:', e.message);
+            break;
         }
-        break;
+    } finally {
+        // Always clear the flag so subsequent scans are not blocked
+        llmScanInProgress = false;
     }
     
-    llmScanInProgress = false;
     return null;
 }
 
