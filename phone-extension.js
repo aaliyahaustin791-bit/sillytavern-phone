@@ -992,6 +992,42 @@ var MAX_SCAN_RETRIES = 5;
 var llmScanInProgress = false;
 var llmContextCache = null;
 
+var scanRetryCount = 0;
+var scanHasRealConversation = false;
+var MAX_SCAN_RETRIES = 5;
+var llmScanInProgress = false;
+var llmContextCache = null;
+
+/**
+ * Checks if the chat has actual conversation content (not just a greeting).
+ * Returns true only if there are at least 3 messages with at least one user message.
+ */
+function chatHasRealConversation() {
+    // Method 1: ST chat array
+    if (typeof chat !== 'undefined' && Array.isArray(chat) && chat.length >= 3) {
+        var userCount = 0;
+        for (var i = 0; i < chat.length; i++) {
+            if (chat[i] && chat[i].is_user) { userCount++; }
+        }
+        return userCount >= 1;
+    }
+    // Method 2: chat_metadata
+    try {
+        if (typeof chat_metadata !== 'undefined' && chat_metadata && Array.isArray(chat_metadata.chat) && chat_metadata.chat.length >= 3) {
+            var userCount2 = 0;
+            for (var j = 0; j < chat_metadata.chat.length; j++) {
+                if (chat_metadata.chat[j] && chat_metadata.chat[j].is_user) { userCount2++; }
+            }
+            return userCount2 >= 1;
+        }
+    } catch(e) {}
+    // Method 3: DOM — count user and NPC messages
+    var userMsgs = document.querySelectorAll('#chat .me');
+    var npcMsgs = document.querySelectorAll('#chat .mes:not(.me):not(.system)');
+    if (userMsgs.length >= 1 && (userMsgs.length + npcMsgs.length) >= 3) { return true; }
+    return false;
+}
+
 async function scanChatForContacts() {
     // Check if chat is loaded before scanning
     var chatLoaded = false;
@@ -1017,7 +1053,18 @@ async function scanChatForContacts() {
         return;
     }
     
+    // Don't burn API tokens on empty greeting-only chats
+    if (!chatHasRealConversation()) {
+        if (!scanHasRealConversation) {
+            console.log('[Phone Extension] Chat has only a greeting so far — delaying scan until real conversation starts');
+            scanHasRealConversation = true; // just to log once
+            setTimeout(scanChatForContacts, 5000);
+        }
+        return;
+    }
+    
     scanRetryCount = 0;
+    scanHasRealConversation = false; // reset for next chat switch
     // STEP 1: Run LLM analysis FIRST — this extracts real names/context via API
     await analyzeChatWithLLM();
     // STEP 2: Then run the local contact scan using LLM-enriched data
@@ -2568,17 +2615,10 @@ function injectPhone() {
         activeApp=phoneData._activeApp||'phone';
         // Start the ChatDatabank — it will auto-scan contacts when chat is ready
         ChatDatabank.start();
-        // Delayed contact scan (1s) for initial load
+        // One gentle scan attempt — it will self-retry or delay based on conversation content
         setTimeout(function() {
             scanChatForContacts();
-        }, 1000);
-        // Additional delayed scan (3s) to catch late-loading character data
-        setTimeout(function() {
-            if (getKnownCharacterNames().length === 0) {
-                console.log('[Phone Extension] Re-attempting character detection after delay');
-            }
-            scanChatForContacts();
-        }, 3000);
+        }, 2000);
         renderUI();
         startNpcAutoTextEngine();
     },300);
