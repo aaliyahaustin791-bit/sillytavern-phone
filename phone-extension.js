@@ -2158,7 +2158,6 @@ var BrowserApp = {
     },
     _esc: function(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); },
     bookmarkUrl: function() {
-    bookmarkUrl: function() {
         var tab=phoneData.browser.tabs.find(function(t){return t.id===phoneData.browser.activeTabId;});
         if(!tab||!tab.url){if(typeof toastr!=='undefined')toastr.info('Navigate first');return;}
         var bm=phoneData.browser.bookmarks;
