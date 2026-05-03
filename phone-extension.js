@@ -2513,7 +2513,7 @@ function _phoneClickHandler(e) {
         if (t.dataset.urlbar) { var bar=document.getElementById('pbar'); if(bar) bar.style.display=bar.style.display==='flex'?'none':'flex'; return; }
         // Settings / presets
         if (t.dataset.set) { PhoneApp.applyPreset(t.dataset.set); return; }
-        if (t.dataset.scan) { scanChatForContacts(); if(typeof toastr !== 'undefined') toastr.info('Scanning chat for contacts...'); return; }
+        if (t.closest('[data-scan]')) { scanChatForContacts(); if(typeof toastr !== 'undefined') toastr.info('Scanning chat for contacts...'); return; }
         if (t.dataset.testApi) { SettingsApp.testApi(); return; }
         if (t.dataset.reset) { if(confirm('Reset ALL phone data for this chat?')){ phoneData=getEmptyPhoneData(); savePhoneData(); renderUI(); if(typeof toastr!=='undefined') toastr.success('Phone data reset'); } return; }
     } catch(err) { console.warn('[Phone Extension] Click handler error:', err); }
