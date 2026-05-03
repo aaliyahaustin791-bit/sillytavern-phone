@@ -1024,24 +1024,94 @@ async function scanChatForContacts() {
     await performContactScan();
 }
 
+/*
+ * Attempts to repair common JSON truncation issues from LLM responses.
+ */
+function _repairJSON(raw) {
+    // Strip markdown code fences
+    raw = raw.replace(/^```(?:json)?\s*/gm, '').replace(/```\s*$/gm, '').trim();
+    // Attempt naive parse first
+    try { return JSON.parse(raw); } catch(e) {}
+    
+    // If the JSON is truncated, try to close it
+    // Count braces/brackets to find unclosed structures
+    var openBraces = 0, openBrackets = 0, inString = false, escape = false;
+    for (var i = 0; i < raw.length; i++) {
+        var ch = raw[i];
+        if (escape) { escape = false; continue; }
+        if (ch === '\\') { escape = true; continue; }
+        if (ch === '"') { inString = !inString; continue; }
+        if (inString) continue;
+        if (ch === '{') openBraces++;
+        else if (ch === '}') openBraces--;
+        else if (ch === '[') openBrackets++;
+        else if (ch === ']') openBrackets--;
+    }
+    
+    // Close unclosed brackets first (innermost)
+    while (openBrackets > 0) { raw += ']'; openBrackets--; }
+    // Close unclosed string
+    if (inString) raw += '"';
+    // Close unclosed braces
+    while (openBraces > 0) { raw += '}'; openBraces--; }
+    // Remove trailing commas before closing braces/brackets
+    raw = raw.replace(/,\s*([}\]])/g, '$1');
+    
+    try { return JSON.parse(raw); } catch(e) {}
+    return null;
+}
+
+/*
+ * Filters extracted names through validation to prevent chat titles/system names.
+ */
+function _validateLLMExtracted(result) {
+    var cleaned = {
+        activeCharacter: '',
+        userName: '',
+        characters: [],
+        locations: [],
+        items: [],
+        summary: ''
+    };
+    if (result.activeCharacter && _isValidCharacterName(result.activeCharacter)) {
+        cleaned.activeCharacter = result.activeCharacter.trim();
+    }
+    if (result.userName) {
+        cleaned.userName = result.userName.trim().substring(0, 50);
+    }
+    if (Array.isArray(result.characters)) {
+        for (var i = 0; i < result.characters.length; i++) {
+            var nm = result.characters[i].trim();
+            if (nm && _isValidCharacterName(nm) && nm !== cleaned.activeCharacter) {
+                cleaned.characters.push(nm);
+            }
+        }
+    }
+    cleaned.locations = Array.isArray(result.locations) ? result.locations.filter(function(x) { return x && x.length > 0; }) : [];
+    cleaned.items = Array.isArray(result.items) ? result.items.filter(function(x) { return x && x.length > 0; }) : [];
+    cleaned.summary = (result.summary || '').substring(0, 200);
+    return cleaned;
+}
+
 /**
  * LLM-powered chat analysis: sends chat messages to the configured API and extracts
  * structured context (character names, locations, items, relationships) into the databank.
  */
-async function analyzeChatWithLLM() {
+async function analyzeChatWithLLM(maxRetries) {
     if (llmScanInProgress) {
         console.log('[Phone Extension] LLM scan already in progress, skipping');
-        return;
+        return null;
     }
     
     var s = getSettings();
     var apiBase = (s.phoneApiUrl || '').replace(/\/$/, '');
     var apiKey = s.phoneApiKey || '';
     var apiModel = s.phoneApiModel || 'gpt-4o-mini';
+    maxRetries = maxRetries !== undefined ? maxRetries : 2;
     
     if (!apiBase || !apiKey) {
         console.log('[Phone Extension] LLM scan skipped: no API configured (set phoneApiUrl + phoneApiKey in settings)');
-        return;
+        return null;
     }
     
     // Build chat context from databank or DOM scraping
@@ -1060,7 +1130,7 @@ async function analyzeChatWithLLM() {
     // Fallback: DOM scrape raw message text
     if (chatLines.length === 0) {
         var msgEls = document.querySelectorAll('#chat .mes');
-        if (!msgEls.length) return;
+        if (!msgEls.length) return null;
         var limit = Math.min(60, msgEls.length);
         var start = msgEls.length - limit;
         for (var i = start; i < msgEls.length; i++) {
@@ -1077,7 +1147,7 @@ async function analyzeChatWithLLM() {
         }
     }
     
-    if (chatLines.length === 0) return;
+    if (chatLines.length === 0) return null;
     
     var chatContext = chatLines.join('\n');
     
@@ -1097,60 +1167,84 @@ async function analyzeChatWithLLM() {
     llmScanInProgress = true;
     console.log('[Phone Extension] LLM analyzing chat... (' + chatLines.length + ' messages via ' + apiModel + ')');
     
-    try {
-        var res = await fetch(apiBase + '/chat/completions', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': 'Bearer ' + apiKey
-            },
-            body: JSON.stringify({
+    var attempt = 0;
+    while (attempt <= maxRetries) {
+        try {
+            var bodyObj = {
                 model: apiModel,
                 messages: [{ role: 'user', content: llmPrompt }],
-                max_tokens: 500,
+                max_tokens: 2000,
                 temperature: 0.1
-            })
-        });
-        
-        var data = await res.json();
-        if (data && data.choices && data.choices[0] && data.choices[0].message) {
-            var raw = data.choices[0].message.content;
-            // Strip markdown code blocks if present
-            raw = raw.replace(/^```(?:json)?\s*/gm, '').replace(/```\s*$/gm, '');
-            var result = JSON.parse(raw);
+            };
             
-            console.log('[Phone Extension] LLM chat analysis result:', result);
+            // OpenAI-compatible JSON mode (works with many backends including DeepSeek)
+            bodyObj.response_format = { type: 'json_object' };
             
-            // Cache the result for contact scanning
-            llmContextCache = result;
+            var res = await fetch(apiBase + '/chat/completions', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': 'Bearer ' + apiKey
+                },
+                body: JSON.stringify(bodyObj)
+            });
             
-            // Add active character and NPCs as contacts
-            if (result.activeCharacter) {
-                addOrUpdateContact(result.activeCharacter, true);
-                console.log('[Phone Extension] LLM detected active character:', result.activeCharacter);
-            }
-            if (result.userName) {
-                if (typeof name1 !== 'undefined' && !name1) {
-                    // Could set name1 if needed — but usually user sets this
+            var data = await res.json();
+            if (data && data.choices && data.choices[0] && data.choices[0].message) {
+                var raw = data.choices[0].message.content;
+                var result = _repairJSON(raw);
+                
+                if (!result) {
+                    // Retry on parse failure (might be a transient truncation)
+                    attempt++;
+                    if (attempt <= maxRetries) {
+                        console.log('[Phone Extension] JSON repair failed, retrying (' + attempt + '/' + maxRetries + ')...');
+                        continue;
+                    }
+                    console.warn('[Phone Extension] LLM returned unparseable response after ' + (maxRetries + 1) + ' attempts');
+                    break;
                 }
-            }
-            if (Array.isArray(result.characters)) {
-                for (var i = 0; i < result.characters.length; i++) {
-                    addOrUpdateContact(result.characters[i], false);
+                
+                // Validate and filter extracted data
+                result = _validateLLMExtracted(result);
+                
+                console.log('[Phone Extension] LLM chat analysis result:', result);
+                
+                // Cache the result for contact scanning
+                llmContextCache = result;
+                
+                // Add active character as a contact
+                if (result.activeCharacter) {
+                    addOrUpdateContact(result.activeCharacter, true);
+                    console.log('[Phone Extension] LLM detected active character:', result.activeCharacter);
                 }
+                
+                // Add other NPC characters as contacts
+                if (Array.isArray(result.characters)) {
+                    for (var i = 0; i < result.characters.length; i++) {
+                        addOrUpdateContact(result.characters[i], false);
+                        console.log('[Phone Extension] LLM detected NPC:', result.characters[i]);
+                    }
+                }
+                
+                // Store extracted context in phoneData for browser/NPC use
+                phoneData._llmContext = result;
+                savePhoneData();
+                
+                return result;
             }
-            
-            // Store extracted context in phoneData for browser/NPC use
-            phoneData._llmContext = result;
-            savePhoneData();
-            
-            return result;
+        } catch(e) {
+            attempt++;
+            if (attempt <= maxRetries) {
+                console.log('[Phone Extension] LLM analysis error (retry ' + attempt + '/' + maxRetries + '):', e.message);
+                continue;
+            }
+            console.warn('[Phone Extension] LLM chat analysis failed:', e.message);
         }
-    } catch(e) {
-        console.warn('[Phone Extension] LLM chat analysis failed:', e.message);
-    } finally {
-        llmScanInProgress = false;
+        break;
     }
+    
+    llmScanInProgress = false;
     return null;
 }
 
